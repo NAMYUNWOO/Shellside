@@ -1,0 +1,22 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# dependencies and build output
+node_modules/
+dist/
+
+# secrets and local config
+.env
+.env.*
+*.pem
+*.key
+
+# logs
+*.log
+
+# Shellside runtime data (boards, uploads, Claude session files): never commit
+poc/data/
+poc/workspace/
+poc/workspaces/
