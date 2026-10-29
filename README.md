@@ -60,6 +60,15 @@ Claude writes progress to a channel while the job runs (`channel_write`, or `wb 
 the app redraws on each write. Pause and Stop in the app send events that reach Claude through `board_wait_event`.
 Repeated writes collapse into a single history line until Claude reads them.
 
+### A browser you both use
+
+A **browser** frame is a real Chrome tab on the board. You browse in it with mouse and keyboard (Korean and other IME
+input included); Claude reads the same page as text with refs (`[@5 textbox "Email"]`, `[@10 button "Send"]`) and drives
+it with batched steps (`browser_act`: fill, click, wait…, then a fresh snapshot), like
+[ego-lite](https://github.com/citrolabs/ego-lite)'s browser for agents. You see a marker on everything Claude clicks.
+**Take over** whenever you want (Claude waits until you hand it back), and Claude hands the browser to you for sign-ins,
+CAPTCHAs and payments (`browser_handoff`). Downloads land in the board's folder. Details: [poc/README.md](poc/README.md#board-browser).
+
 ### The agent's side: MCP and the `wb` CLI
 
 ![The wb CLI in a board terminal: list tools and channels, then receive the Pause click as an event](docs/images/terminal-wb-cli.png)
@@ -93,7 +102,8 @@ The full design is in [docs/product-plan.md](docs/product-plan.md). The PoC inte
 
 ## Quick start
 
-Requirements: macOS or Linux, Node.js 22+, and [Claude Code](https://claude.com/claude-code) installed and signed in.
+Requirements: macOS or Linux, Node.js 22+, [Claude Code](https://claude.com/claude-code) installed and signed in, and
+Google Chrome (or Chromium, Edge, Brave) for the board browser.
 
 ```bash
 cd poc
@@ -119,6 +129,8 @@ Shellside runs a real shell for every board, so treat it like one.
 - Each board's terminal runs with your user's permissions, and so does Claude inside it. There is no container
   isolation yet; only run agents you trust.
 - Apps run in sandboxed iframes (opaque origin, CSP with no network) and talk to the board only through `postMessage`.
+- The board browser is a separate headless Chrome reached through a pipe (no debugging port). Whatever you sign in to
+  there, Claude can use while it drives the browser; take over when you type secrets.
 - `poc/data/` and `poc/workspaces/` hold your boards, uploaded files and session files. They are git-ignored; never commit them.
 
 ## Repository layout

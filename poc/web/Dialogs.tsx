@@ -169,6 +169,7 @@ export function SaveToLibraryDialog({ tool, onClose, onNotice }: { tool: Tool; o
     table: t("Keeps the columns, clears the rows.", "열 구성은 남기고 행은 비웁니다."),
     note: t("Saves the text as it is.", "글 내용은 그대로 저장합니다."),
     app: t("Keeps the app code, clears the app state.", "앱 코드는 남기고 앱 상태는 비웁니다."),
+    browser: t("Keeps the address; tabs and sign-ins are not saved with it.", "주소만 남깁니다. 탭과 로그인 상태는 저장되지 않습니다."),
   };
   const save = async () => {
     setBusy(true);

@@ -130,10 +130,10 @@ function ToolInspector({ tool, now, errors, onNotice, onSendToClaude, onSave, on
 
       {L && (
         <section className="insp-section insp-xyw">
-          {(["x", "y", "w"] as const).map((k) => (
+          {(tool.kind === "browser" ? (["x", "y", "w", "h"] as const) : (["x", "y", "w"] as const)).map((k) => (
             <label key={k}>
               <span>{k.toUpperCase()}</span>
-              <NumberField value={L[k]} onCommit={(v) => api.setLayout(tool.id, { [k]: v }).catch(fail)} />
+              <NumberField value={L[k] ?? 0} onCommit={(v) => api.setLayout(tool.id, { [k]: v }).catch(fail)} />
             </label>
           ))}
         </section>

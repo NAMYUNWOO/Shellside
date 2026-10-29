@@ -22,7 +22,7 @@ Open <http://127.0.0.1:5173>. The server listens only on `127.0.0.1:4100`.
 | --- | --- |
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
 | Center: **Canvas** | Tools sit on it as frames. Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Wheel / pinch = zoom, Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width |
-| **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here |
+| **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here / + Browser here |
 | Right: **Inspector** | One selected: properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Claude mark inside the button when signed in to Claude, and `!` when a permission prompt is waiting |
 | Bottom: **Input box** | Sends straight to Claude, with the selected components attached as context |
@@ -68,6 +68,7 @@ The selected components are attached to the request as `[WorkBoard] … Tools: -
 `app_create` `app_update` `app_snapshot` `app_invoke` `app_logs`
 `channel_list` `channel_read` `channel_write` `channel_delete`
 `library_list` `library_use` `library_save`
+`browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_handoff`
 
 - Four tool kinds (checklist, form, table, note) + **apps** (React code written by the agent, run in an isolated iframe, with state, events and files only through the `board` bridge).
 - The agent can't check checklist items marked `gate: "human"`. Once a human approves through `board_ask`, the board checks them.
@@ -88,6 +89,35 @@ Apps on the same board exchange data with each other in real time, without Claud
 - People: with nothing selected, the **Channels** tab in the right panel shows each channel's value, the app that last wrote it, and when.
 - History: when an app keeps writing to a channel, the writes merge into one history line until Claude reads it.
 - The `uses` field of `app_snapshot` lists the channels and tools that app reads.
+
+## Board browser
+
+A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, right-click **+ Browser here**, or Claude's
+`browser_open`). You and Claude use the same tab: you with mouse and keyboard, Claude with text snapshots and batched steps.
+
+- **Engine.** The server starts one headless Chrome on first use (your installed Google Chrome, Chromium, Edge or Brave,
+  or Playwright's Chromium; set `WB_CHROME` to choose). It is driven over the DevTools protocol through a **pipe**, not a
+  port, so no other program or website can connect to it. Its profile (cookies, sign-ins) is separate from your own
+  Chrome and lives in `data/browser/profile`. Tabs nobody has used for 10 minutes close (the address is kept), and
+  Chrome quits when no tab is left.
+- **You.** The frame shows the page live (screencast frames over `/ws/browser`, rendered at 2× so text stays sharp on
+  high-density screens). Clicks, scrolling, keys, paste and IME input (Korean, Japanese…) go to the page; IME composition happens in the page itself, as in a normal browser. Headless Chrome draws
+  no dropdowns or dialogs, so the board draws them: `<select>` lists, `alert/confirm/prompt`, file pickers (files go
+  through the board's upload). Links that open new windows become tabs. Resize the frame from its right or bottom edge.
+- **Claude.** `browser_snapshot` turns the page into compact text where everything actionable gets a ref:
+  `[@5 textbox "Email" placeholder="you@example.com"]`, `[@10 button "Send"]`. `browser_act` runs a list of steps in one
+  call (`goto`, `click`, `fill`, `select`, `check`, `press`, `waitFor`, `eval`, `upload`, `dialog`, tabs…) and returns what
+  each did plus a fresh snapshot, in the spirit of [ego-lite](https://github.com/citrolabs/ego-lite): fewer round trips
+  than one tool call per click. Targets are `@N`, `css:<selector>` or `text:<visible text>`. The snapshot is built by a
+  script in an isolated world, so page scripts can't see or tamper with it; password values are never included.
+- **Taking turns.** **Take over** gives you the browser: Claude's browser calls are refused until you **hand it back**.
+  For sign-ins, CAPTCHAs or payments Claude calls `browser_handoff`, which does the same from Claude's side and waits for
+  you. While Claude acts, the frame shows a banner and a marker on what it clicks; every batch lands in History.
+- **Files.** Downloads go to the board workspace's `downloads/`; Claude can upload only files inside the workspace.
+- **Apps.** An app can read a browser like any tool (`useTool(id).state` → `url`, `title`) and open an address with
+  `board.writeTool(id, [{ op: "replace", path: "/url", value }])`.
+- CLI: `wb br open|snap|act|click|fill|press|select|eval|shot|handoff` (`wb help`).
+- Settings: `WB_CHROME` (which browser), `WB_BROWSER_SCALE` (pixel density, default 2), `WB_DEBUG_BROWSER=1` (log the person's input on the server).
 
 ## Examples
 
@@ -114,17 +144,22 @@ server/apps.ts       App compilation (sucrase), sandbox runtime build (esbuild)
 server/mcp.ts        Board MCP (per board, stateless Streamable HTTP)
 server/pty.ts        Shell sessions (node-pty), output replay on reconnect, foreground process
 server/workspace.ts  Working folder setup (.mcp.json, CLAUDE.md, settings + hooks)
+server/cdp.ts        Finds and starts the one headless Chrome; DevTools protocol over a pipe
+server/browser.ts    Board browsers: tabs, screencast to the board, the person's input, the agent's snapshot/act/handoff
+server/browser-inpage.js  Runs in each page (isolated world): page → text with @refs, finding and preparing elements
 sandbox/runtime.tsx  React + board bridge inside the app iframe (useBoardState, useChannel, useTool …)
 web/live.ts          Store for the board's channel and tool values, shared by app frames (instant app → app delivery, server sync)
 web/main.tsx         App shell: board list, active board, per-board terminal windows
 web/Canvas.tsx       React Flow canvas (frames, selection box, right-click, drop)
 web/BoardPanel.tsx   Board view: header, menus, dialogs, library, input box
+web/BrowserView.tsx  A browser frame: live page, address bar, tabs, take over, dropdown/dialog/file overlays
 web/TerminalPane.tsx The only file that knows about wterm (the point to swap or fork it)
 ```
 
 ## Data
 
-`data/boards.json` (board list), `data/boards/<id>.json` (per board: tools, history, channels), `data/library.json` (library).
+`data/boards.json` (board list), `data/boards/<id>.json` (per board: tools, history, channels), `data/library.json` (library),
+`data/browser/` (the board browser's Chrome profile: cookies and sign-ins).
 Data from the single-board days (`data/board.json`, `workspace/`) is moved into a "default board" (`main`) on first run.
 
 ## Open source used
@@ -145,4 +180,7 @@ wterm (Apache-2.0), React Flow `@xyflow/react` (MIT), MCP TypeScript SDK, sucras
 - Each board's terminal is a real shell with your user's permissions, and Claude runs in it. There is no container isolation yet. Don't expose the port (no port forwarding, no tunnels), and only run agents you trust.
 - App code runs in a sandboxed iframe (opaque origin, a CSP that allows no network access) and talks to the board only through `postMessage`.
 - When app code writes to other tools, those writes count as the agent's writes, so read-only settings and human approval gates still apply.
-- `data/` and `workspaces/` hold your boards, uploads and session files. They are git-ignored; never commit them.
+- The board UI refuses to be framed by other sites (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), so no page can overlay it to trick a click onto an approval or into the terminal.
+- The board browser's Chrome is reached only through a pipe (no debugging port). It opens only `http(s)`, `file` and `about:blank` addresses. Its profile (`data/browser/profile`) holds whatever you sign in to there, readable by your user account, and Claude can use those sessions while it drives the browser: sign in only where you'd let Claude act. Take over when you type secrets; Claude can't read or act until you hand it back.
+- Web page text reaches Claude as data, marked as such in every snapshot; the board rules tell it never to follow instructions found on a page.
+- `data/` and `workspaces/` hold your boards, uploads, downloads, browser profile and session files. They are git-ignored; never commit them.

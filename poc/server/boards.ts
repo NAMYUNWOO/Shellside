@@ -8,6 +8,7 @@ import { Board, BoardError } from "./board.ts";
 import { ShellSession } from "./pty.ts";
 import { prepareWorkspace, writeSessionKit } from "./workspace.ts";
 import { claudeAuth, cleanEnv, isClaude, loginSignal, stateAfterHook, type AgentState } from "./agent.ts";
+import { BoardBrowsers, type BrowserService } from "./browser.ts";
 
 export interface BoardMeta {
   id: string;
@@ -35,12 +36,15 @@ interface RegistryOptions {
   /** Command Claude Code hooks run to report state, e.g. `"node" ".../wb.mjs" hook`. */
   hookCommand: string;
   compile: (source: string) => string;
+  /** The server's one headless Chrome, shared by every board's browser tools. */
+  browsers: BrowserService;
 }
 
 /** One board, its shell and the browser tabs watching it. */
 export class BoardRuntime {
   readonly board: Board;
   readonly shell: ShellSession;
+  readonly browsers: BoardBrowsers;
   readonly clients = new Set<WebSocket>();
   private rpcPending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private hook: { state: AgentState; at: string } = { state: "starting", at: new Date().toISOString() };
@@ -57,6 +61,7 @@ export class BoardRuntime {
     prepareWorkspace(meta.workspace, mcpUrl, opts.hookCommand);
     const kit = writeSessionKit(join(opts.dataDir, "sessions", meta.id), mcpUrl, opts.hookCommand);
     this.board = new Board(join(opts.dataDir, "boards", `${meta.id}.json`), opts.compile);
+    this.browsers = new BoardBrowsers(opts.browsers, meta.id, this.board, meta.workspace);
     const shellPath = process.env.SHELL ?? "/bin/bash";
     const isBash = /(^|\/)bash$/.test(shellPath);
     this.shell = new ShellSession({
@@ -162,6 +167,7 @@ export class BoardRuntime {
 
   dispose() {
     clearInterval(this.watch);
+    this.browsers.dispose();
     this.shell.kill();
     for (const ws of this.clients) ws.close();
   }

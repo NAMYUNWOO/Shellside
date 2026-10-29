@@ -19,7 +19,7 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { Layout, Tool } from "../shared/catalog.ts";
+import { BROWSER_HEIGHT, type Layout, type Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { ToolBody } from "./tools.tsx";
 import { kindLabel, useT } from "./i18n.tsx";
@@ -114,7 +114,8 @@ export function BoardCanvas(props: BoardCanvasProps) {
             type: "frame",
             position: p?.dragging ? p.position : { x: L.x, y: L.y },
             width: p?.resizing ? p.width : L.w,
-            height: p?.resizing ? p.height : undefined, // height follows the content
+            // Height follows the content, except browsers: they keep a set height and the page scrolls inside.
+            height: p?.resizing ? p.height : t.kind === "browser" ? (L.h ?? BROWSER_HEIGHT.default) : undefined,
             dragHandle: ".frame-label",
             selected: selectedSet.current.has(t.id),
             data: { tool: t, active: activeIds.has(t.id), waiting: waitingIds.has(t.id), errors: appErrors[t.id] ?? 0, onAppErrors, onLayout, onNotice },
@@ -247,7 +248,8 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
   const t = useT();
   const zoom = useStore((s) => s.transform[2]);
   const { tool, active, waiting, errors } = data;
-  const cls = ["frame", selected && "selected", active && "active", waiting && "waiting"].filter(Boolean).join(" ");
+  const browser = tool.kind === "browser";
+  const cls = ["frame", browser && "browser-frame", selected && "selected", active && "active", waiting && "waiting"].filter(Boolean).join(" ");
   return (
     <div className={cls} style={{ ["--z" as string]: zoom }}>
       <div className="frame-label" style={{ transform: `scale(${1 / zoom})` }} title={tool.description || tool.title}>
@@ -258,9 +260,10 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
         {errors > 0 && <span className="pill error">{t(`${errors} error${errors > 1 ? "s" : ""}`, `오류 ${errors}`)}</span>}
       </div>
       <div className="frame-body">
-        <ToolBody tool={tool} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
+        <ToolBody tool={tool} selected={!!selected} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
         {tool.kind === "app" && !selected && (
           // First click selects the app; only then does its iframe get the pointer, so scroll/drag keep panning the canvas.
+          // (A browser needs no shield: its first click already reaches the page, and its wheel zooms the board until selected.)
           <div className="frame-shield" title={t("Click to use the app", "클릭해서 앱 사용")} />
         )}
       </div>
@@ -268,10 +271,29 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
         <NodeResizeControl
           variant={ResizeControlVariant.Line}
           position="right"
-          minWidth={240}
+          minWidth={browser ? 320 : 240}
           maxWidth={1600}
           onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, w: p.width })}
         />
+      )}
+      {selected && browser && (
+        <>
+          <NodeResizeControl
+            variant={ResizeControlVariant.Line}
+            position="bottom"
+            minHeight={BROWSER_HEIGHT.min}
+            maxHeight={BROWSER_HEIGHT.max}
+            onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, h: p.height })}
+          />
+          <NodeResizeControl
+            position="bottom-right"
+            minWidth={320}
+            maxWidth={1600}
+            minHeight={BROWSER_HEIGHT.min}
+            maxHeight={BROWSER_HEIGHT.max}
+            onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, w: p.width, h: p.height })}
+          />
+        </>
       )}
     </div>
   );
