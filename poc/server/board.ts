@@ -5,6 +5,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from "
 import { dirname } from "node:path";
 import jsonpatch from "fast-json-patch";
 import {
+  BROWSER_HEIGHT,
+  browserUrlProblem,
   CHANNEL_MAX_BYTES,
   CHANNEL_NAME,
   DEFAULT_WIDTH,
@@ -63,6 +65,7 @@ const AGENT_FACING: BoardEventType[] = [
   "file_uploaded",
   "channel_updated",
   "channel_deleted",
+  "browser",
 ];
 
 export interface AppLog {
@@ -212,7 +215,7 @@ export class Board {
   // ── tool writes ────────────────────────────────────────────────────────────
   createTool(
     actor: Actor,
-    input: { title: string; description?: string; kind: ToolKind; props?: unknown; state?: unknown; agentAccess?: "read" | "write"; id?: string; width?: number; at?: { x: number; y: number } },
+    input: { title: string; description?: string; kind: ToolKind; props?: unknown; state?: unknown; agentAccess?: "read" | "write"; id?: string; width?: number; height?: number; at?: { x: number; y: number } },
   ): Tool {
     if (!TOOL_KINDS.includes(input.kind)) throw new BoardError(`unknown kind "${input.kind}". Use one of: ${TOOL_KINDS.join(", ")}`);
     const v = validateTool(input.kind, input.props, input.state);
@@ -238,6 +241,8 @@ export class Board {
     const at = input.at && Number.isFinite(input.at.x) && Number.isFinite(input.at.y) ? input.at : null;
     // A person adding a tool drops it where they are looking; the agent's tools go to the next free spot.
     t.layout = at ? { x: Math.round(at.x - w / 2), y: Math.round(at.y - 80), w } : this.autoPlace(t.kind, w, estimateHeight(t));
+    // A browser frame has a fixed height (the page scrolls inside it).
+    if (t.kind === "browser") t.layout.h = clampBrowserHeight(input.height ?? BROWSER_HEIGHT.default);
     this.tools.set(t.id, t);
     this.emit({ type: "tool", tool: t });
     this.log(actor, "tool_created", [`Created ${t.kind} "${t.title}"`, `"${t.title}" ${t.kind} 도구 생성`], { toolId: t.id });
@@ -292,6 +297,7 @@ export class Board {
     const v = validateTool(t.kind, t.props, nextState);
     if (!v.ok) throw new BoardError(`patch would make state invalid: ${v.error}`);
     if (t.kind === "checklist" && actor === "agent") this.checkGates(t.state, v.state);
+    if (t.kind === "browser") this.checkBrowser(actor, t, v.state);
     const next: Tool = { ...t, state: v.state, version: t.version + 1, updatedBy: actor, updatedAt: now() };
     this.tools.set(t.id, next);
     this.emit({ type: "tool", tool: next });
@@ -310,6 +316,7 @@ export class Board {
       w: clampWidth(num(input.w, cur.w)),
       ...(input.h !== undefined || cur.h !== undefined ? { h: Math.max(40, Math.min(20_000, num(input.h, cur.h ?? 300))) } : {}),
     };
+    if (t.kind === "browser") layout.h = clampBrowserHeight(layout.h ?? BROWSER_HEIGHT.default);
     const next = { ...t, layout };
     this.tools.set(t.id, next);
     this.emit({ type: "tool", tool: next });
@@ -360,6 +367,40 @@ export class Board {
         { tool: t },
       );
     }
+  }
+
+  /** The person can always take the browser over and hand it back; the agent can hand it over but never take it back. */
+  private checkBrowser(actor: Actor, t: Tool, next: any) {
+    if (actor === "agent" && t.state.control === "person") {
+      throw new BoardError(`The person has taken control of browser "${t.title}". Wait for them to hand it back (board_wait_event).`, 409);
+    }
+    if (actor === "agent" && next.control === "shared" && t.state.control !== "shared") throw new BoardError("only the person can hand the browser back", 403);
+    if (next.url !== t.state.url) {
+      const problem = browserUrlProblem(next.url);
+      if (problem) throw new BoardError(problem);
+    }
+  }
+
+  /**
+   * State the system itself observed (a board browser navigated, its title changed): no actor, no history line,
+   * no news for the agent. Views and apps still get the new state.
+   */
+  setSystemState(toolId: string, partial: Record<string, unknown>): Tool | undefined {
+    const t = this.tools.get(toolId);
+    if (!t) return undefined;
+    const merged = { ...t.state, ...partial };
+    if (JSON.stringify(merged) === JSON.stringify(t.state)) return t;
+    const v = validateTool(t.kind, t.props, merged);
+    if (!v.ok) return t;
+    const next: Tool = { ...t, state: v.state, version: t.version + 1, updatedAt: now() };
+    this.tools.set(t.id, next);
+    this.emit({ type: "tool", tool: next });
+    return next;
+  }
+
+  /** A history line about a board browser (what the agent did in it, a take-over, a download). */
+  browserEvent(actor: Actor, toolId: string, summary: [string, string]) {
+    return this.log(actor, "browser", summary, { toolId });
   }
 
   private checkGates(before: any, after: any) {
@@ -606,6 +647,7 @@ export class Board {
 }
 
 const clampWidth = (w: number) => Math.max(240, Math.min(1600, Math.round(w)));
+const clampBrowserHeight = (h: number) => Math.max(BROWSER_HEIGHT.min, Math.min(BROWSER_HEIGHT.max, Math.round(Number(h) || BROWSER_HEIGHT.default)));
 
 /** Rough frame height before the board has measured it. */
 function estimateHeight(t: Tool): number {
@@ -619,6 +661,8 @@ function estimateHeight(t: Tool): number {
       return 110 + 62 * (t.props?.fields?.length ?? 0);
     case "app":
       return t.props?.height ?? 320;
+    case "browser":
+      return BROWSER_HEIGHT.default;
     default:
       return 180;
   }
@@ -640,5 +684,12 @@ function describePatch(t: Tool, patch: any[]): [string, string] {
     if (en.length) return [`"${t.title}" ${en.join(", ")}`, `"${t.title}" ${ko.join(", ")}`];
   }
   if (t.kind === "app") return [`"${t.title}" app state changed`, `"${t.title}" 앱 상태 변경`];
+  if (t.kind === "browser") {
+    const ctl = patch.find((op) => op.path === "/control");
+    if (ctl?.value === "person") return [`Took over browser "${t.title}"`, `"${t.title}" 브라우저를 직접 조작`];
+    if (ctl?.value === "shared") return [`Handed browser "${t.title}" back to Claude`, `"${t.title}" 브라우저를 Claude에게 돌려줌`];
+    const url = patch.find((op) => op.path === "/url");
+    if (url) return [`Browser "${t.title}" → ${String(url.value).slice(0, 300)}`, `"${t.title}" 브라우저 → ${String(url.value).slice(0, 300)}`];
+  }
   return [`"${t.title}" state changed (${patch.length} ops)`, `"${t.title}" 상태 변경 (${patch.length}개 연산)`];
 }

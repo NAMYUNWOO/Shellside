@@ -34,6 +34,16 @@ const HELP = `wb — WorkBoard from the terminal (acts as the agent)
   wb ch set <name> <json-value> [--base N]   set it (apps update at once)
   wb ch rm <name>                         delete it
 
+  browser (a real Chrome tab on the board; the person watches and can take over)
+  [id] = the browser's tool id; leave it out when the board has one browser
+  wb br open <url> [--tool id] [--title t]   open an address (new browser unless --tool), print a snapshot
+  wb br snap [id] [--selector css] [--interactive] [--max n]   the page as text with @refs
+  wb br act [id] '<json steps>'           run steps, e.g. '[{"fill":"@5","text":"hi"},{"press":"Enter"}]' (- = read stdin)
+  wb br goto|click|fill|press|select [id] <args…>   one step: click @3 · fill @5 "text" · press Enter · select @7 Korea
+  wb br eval [id] '<js>'                  run page JavaScript, print the value
+  wb br shot [id] [file.png] [--full]     save a screenshot
+  wb br handoff [id] <message>            let the person do a step (sign in…) and wait until they hand it back
+
 Exit codes: 0 ok, 1 error, 2 rejected by the person, 3 still pending (timeout).`;
 
 function parse(argv) {
@@ -181,6 +191,76 @@ switch (cmd) {
       await call("DELETE", at(name));
       console.log(`ok · deleted ${name}`);
     } else die("usage: wb ch ls|get|set|rm ...");
+    break;
+  }
+  case "br":
+  case "browser": {
+    const [sub, ...rest] = args;
+    // The browser's id is optional: "auto" = the board's only browser.
+    const id = rest[0] && /^browser_[\w-]+$/.test(rest[0]) ? rest.shift() : "auto";
+    const B = `/api/browser/${id}`;
+    const printAct = (r) => {
+      for (const s of r.steps) console.log(`${s.ok ? "ok  " : "FAIL"} ${s.step}. ${s.ok ? s.did : s.error}${s.note ? ` (${s.note})` : ""}${s.value !== undefined ? `\n     → ${JSON.stringify(s.value)}` : ""}`);
+      for (const n of r.notes ?? []) console.log(`note: ${n}`);
+      if (r.stopped) console.log(`stopped: ${r.stopped}`);
+      for (const d of r.downloads ?? []) console.log(`downloaded: ${d.path}`);
+      if (r.snapshot) console.log(`\n${r.snapshot}`);
+      if (!r.ok) process.exit(1);
+    };
+    const step = (s) => call("POST", `${B}/act`, { steps: [s], snapshot: opts.snapshot === "false" ? false : !!opts.snapshot }).then(printAct);
+    if (sub === "open") {
+      if (!rest[0]) die("usage: wb br open <url> [--tool id]");
+      const r = await call("POST", "/api/browser", { url: rest[0], toolId: opts.tool, title: opts.title });
+      console.log(`toolId: ${r.toolId}\n\n${r.text}`);
+    } else if (sub === "snap" || sub === "snapshot") {
+      const q = new URLSearchParams();
+      if (opts.selector) q.set("selector", opts.selector);
+      if (opts.interactive) q.set("interactive", "1");
+      if (opts.max) q.set("max", opts.max);
+      console.log((await call("GET", `${B}/snapshot?${q}`)).text);
+    } else if (sub === "act") {
+      let raw = rest[0];
+      if (!raw || raw === "-") {
+        raw = "";
+        for await (const chunk of process.stdin) raw += chunk;
+      }
+      const steps = json(raw, "steps");
+      printAct(await call("POST", `${B}/act`, { steps: Array.isArray(steps) ? steps : [steps], snapshot: opts.snapshot !== "false" }));
+    } else if (sub === "goto") {
+      if (!rest[0]) die("usage: wb br goto [id] <url>");
+      await step({ goto: rest[0] });
+    } else if (sub === "click") {
+      if (!rest[0]) die("usage: wb br click [id] <@N|css:…|text:…>");
+      await step({ click: rest[0] });
+    } else if (sub === "fill") {
+      if (!rest[0] || rest[1] === undefined) die('usage: wb br fill [id] <target> "text" [--enter]');
+      await step({ fill: rest[0], text: rest.slice(1).join(" "), enter: !!opts.enter });
+    } else if (sub === "press") {
+      if (!rest[0]) die("usage: wb br press [id] <key>  (Enter, Tab, Meta+A…)");
+      await step({ press: rest[0] });
+    } else if (sub === "select") {
+      if (!rest[0] || rest[1] === undefined) die("usage: wb br select [id] <target> <option>");
+      await step({ select: rest[0], value: rest.slice(1).join(" ") });
+    } else if (sub === "eval") {
+      if (!rest[0]) die("usage: wb br eval [id] '<javascript>'");
+      const r = await call("POST", `${B}/act`, { steps: [{ eval: rest.join(" ") }], snapshot: false });
+      if (!r.ok) printAct(r);
+      console.log(JSON.stringify(r.steps[0].value, null, 2));
+    } else if (sub === "shot" || sub === "screenshot") {
+      const file = path.resolve(rest[0] ?? `screenshot-${Date.now()}.png`);
+      if (!BOARD) die("WB_BOARD is not set. Run wb inside a WorkBoard terminal, or pass --board <boardId>.");
+      const res = await fetch(`${BASE}/api/b/${BOARD}/browser/${id}/screenshot${opts.full ? "?full=1" : ""}`, { headers: { "x-wb-actor": "agent", "x-wb-client": "cli" } }).catch((err) => die(`cannot reach the board at ${BASE} (${err.message})`));
+      if (!res.ok) die((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+      console.log(file);
+    } else if (sub === "handoff") {
+      if (!rest.length) die("usage: wb br handoff [id] <what the person should do>");
+      const r = await call("POST", `${B}/handoff`, { message: rest.join(" "), timeout: num(opts.timeout) });
+      out(r);
+      if (r.status === "pending") process.exit(3);
+      if (r.status === "answered" && !r.approved) process.exit(2);
+    } else die("usage: wb br open|snap|act|goto|click|fill|press|select|eval|shot|handoff …  (wb help)");
     break;
   }
   case "snapshot":

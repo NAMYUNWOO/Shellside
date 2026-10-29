@@ -1626,3 +1626,304 @@ body.wb-panning iframe,
   justify-content: space-between;
   gap: 8px;
 }
+
+/* ── board browser: a live Chrome tab in a frame ─────────────────────────── */
+.frame.browser-frame {
+  padding: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.frame.browser-frame > .frame-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  border-radius: inherit;
+  overflow: hidden;
+}
+.canvas-wrap .react-flow__resize-control.line.bottom {
+  border-bottom-width: 3px;
+  border-color: var(--accent);
+}
+.browser {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.browser-bar {
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.browser-bar button.icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+.browser-bar > button.primary,
+.browser-bar > button.ghost:not(.icon) {
+  margin-left: 4px;
+}
+input.browser-address {
+  flex: 1;
+  min-width: 80px;
+  height: 28px;
+  margin-left: 4px;
+  border-radius: 14px;
+  background: var(--bg);
+  padding: 0 12px;
+  font-size: 13px;
+}
+input.browser-address:focus {
+  background: var(--panel);
+}
+.browser-progress {
+  height: 2px;
+  margin-top: -2px;
+  position: relative;
+  z-index: 1;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent) no-repeat;
+  background-size: 40% 100%;
+  animation: browser-load 1s linear infinite;
+}
+@keyframes browser-load {
+  from {
+    background-position: -40% 0;
+  }
+  to {
+    background-position: 140% 0;
+  }
+}
+.browser-page {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: #fff;
+  user-select: none;
+}
+.browser-page canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: default;
+}
+.browser.agent .browser-page::after,
+.browser.person .browser-page::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  box-shadow: inset 0 0 0 2px var(--agent);
+}
+.browser.person .browser-page::after {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* Takes the keys for the page. It sits at the last click so IME candidate windows open near the text. */
+textarea.browser-keys {
+  position: absolute;
+  z-index: 3;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  overflow: hidden;
+  pointer-events: none;
+}
+.browser-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--bg);
+}
+.browser-marker {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition:
+    left 0.25s ease,
+    top 0.25s ease;
+}
+.browser-marker .dot {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--agent) 30%, transparent);
+  border: 2px solid var(--agent);
+  animation: browser-ping 1s ease-out infinite;
+}
+.browser-marker .label {
+  position: absolute;
+  left: 16px;
+  top: 14px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 9px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--agent);
+}
+@keyframes browser-ping {
+  from {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent) 45%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 12px transparent;
+  }
+}
+.browser-banner {
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  z-index: 3;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  color: #fff;
+  box-shadow: var(--shadow);
+}
+.browser-banner.agent {
+  background: var(--agent);
+}
+.browser-banner.person {
+  background: var(--accent);
+}
+.browser-error {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--danger, #c43d3d);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--danger, #c43d3d) 40%, transparent);
+  box-shadow: var(--shadow);
+}
+.browser-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+}
+.browser-overlay.dim {
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.28);
+}
+.browser-select {
+  position: absolute;
+  max-height: 50%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+}
+.browser-select button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  padding: 4px 12px;
+  color: var(--text);
+}
+.browser-select button:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.browser-select button.on {
+  background: var(--accent);
+  color: #fff;
+}
+.browser-dialog {
+  width: min(380px, 90%);
+  padding: 14px 16px;
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.browser-dialog .msg {
+  margin: 4px 0 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.browser-dialog input {
+  margin-bottom: 10px;
+}
+.browser-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  z-index: 4;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(29, 29, 27, 0.9);
+}
+.browser-tabs {
+  position: relative;
+}
+.browser-menu {
+  position: absolute;
+  right: 0;
+  top: 32px;
+  z-index: 6;
+  min-width: 240px;
+  max-width: 360px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.browser-menu-row {
+  display: flex;
+  align-items: center;
+}
+.browser-menu-row > button:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.browser-menu-row.on > button:first-child {
+  color: var(--text);
+  font-weight: 600;
+}

@@ -10,6 +10,7 @@ import { compileApp, ensureRuntime, loadSource, RUNTIME_OUT } from "./apps.ts";
 import { claudeAuth, composeRequest, isClaude, isShell, shellQuote } from "./agent.ts";
 import { Library } from "./library.ts";
 import { BoardRegistry, type BoardRuntime } from "./boards.ts";
+import { BrowserService } from "./browser.ts";
 import { CATALOG_DOC, type Actor } from "../shared/catalog.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,7 +35,9 @@ const ALLOWED_ORIGINS = new Set([
 ensureRuntime();
 const library = new Library(LIBRARY_FILE);
 const HOOK_COMMAND = `"${process.execPath}" "${join(ROOT, "bin", "wb.mjs")}" hook`;
-const boards = new BoardRegistry({ dataDir: DATA_DIR, workspacesDir: WORKSPACES, serverUrl: SERVER_URL, binDir: join(ROOT, "bin"), hookCommand: HOOK_COMMAND, compile: compileApp });
+// One headless Chrome (started on first use) behind every board's browser tools. Its profile lives in data/browser/.
+const browsers = new BrowserService(DATA_DIR);
+const boards = new BoardRegistry({ dataDir: DATA_DIR, workspacesDir: WORKSPACES, serverUrl: SERVER_URL, binDir: join(ROOT, "bin"), hookCommand: HOOK_COMMAND, compile: compileApp, browsers });
 
 // ── request guards ───────────────────────────────────────────────────────────
 // Blocks other websites (cross-site requests carry their Origin) and DNS rebinding (foreign Host).
@@ -92,6 +95,8 @@ const channelName = (raw: string) => {
   }
 };
 const clampTimeout = (v: string | null, def: number) => Math.min(Math.max(Number(v ?? def) || def, 1), 600) * 1000;
+/** "auto" = the board's only browser. */
+const browserOf = (rt: BoardRuntime, id: string) => rt.browsers.pick(id === "auto" ? undefined : id);
 const humanOnly = (actor: Actor, what: string) => {
   if (actor !== "human") throw new BoardError(`${what} must come from the person`, 403);
 };
@@ -362,6 +367,45 @@ const boardRoutes: BoardRoute[] = [
       return rt.board.appEvent(params[0], String(body?.type ?? "event"), body?.payload);
     },
   ],
+  // the board browser (see CATALOG_DOC, kind "browser")
+  [
+    "POST",
+    /^\/browser$/,
+    async ({ rt, body, actor }) => {
+      const bt = await rt.browsers.open(actor, { url: String(body?.url ?? ""), toolId: body?.toolId, title: body?.title, width: body?.width, height: body?.height });
+      if (body?.snapshot === false) return { toolId: bt.toolId, url: bt.tab?.url, title: bt.tab?.title };
+      return bt.snapshot(actor, { maxChars: body?.maxChars });
+    },
+  ],
+  [
+    "GET",
+    /^\/browser\/([\w-]+)\/snapshot$/,
+    ({ rt, params, url, actor }) =>
+      browserOf(rt, params[0]).snapshot(actor, {
+        selector: url.searchParams.get("selector") ?? undefined,
+        interactive: url.searchParams.get("interactive") === "1",
+        maxChars: Number(url.searchParams.get("max")) || undefined,
+      }),
+  ],
+  ["POST", /^\/browser\/([\w-]+)\/act$/, ({ rt, params, body, actor }) => browserOf(rt, params[0]).act(actor, body?.steps, { snapshot: body?.snapshot, maxChars: body?.maxChars })],
+  [
+    "GET",
+    /^\/browser\/([\w-]+)\/screenshot$/,
+    async ({ rt, params, url, actor, res }) => {
+      const shot = await browserOf(rt, params[0]).screenshot(actor, { fullPage: url.searchParams.get("full") === "1", format: url.searchParams.get("format") === "jpeg" ? "jpeg" : "png" });
+      res.writeHead(200, { "content-type": shot.mimeType, "cache-control": "no-store", "x-wb-page-url": encodeURI(shot.url ?? "") });
+      res.end(shot.data);
+    },
+  ],
+  [
+    "POST",
+    /^\/browser\/([\w-]+)\/handoff$/,
+    async ({ rt, params, body, actor, res }) => {
+      if (actor !== "agent") throw new BoardError("hand-offs come from the agent", 403);
+      const a = await browserOf(rt, params[0]).handoff(String(body?.message ?? "Please finish this step in the browser."), Math.min(Math.max(Number(body?.timeout) || 300, 5), 1800), abortOnClose(res));
+      return { askId: a.id, status: a.status, ...(a.answer ?? {}) };
+    },
+  ],
   [
     "POST",
     /^\/terminal\/input$/,
@@ -409,7 +453,8 @@ function serveStatic(url: URL, res: ServerResponse) {
   let file = resolve(DIST, rel || "index.html");
   if (!file.startsWith(DIST) || !existsSync(file) || statSync(file).isDirectory()) file = join(DIST, "index.html");
   if (!existsSync(file)) return send(res, 404, { error: "run `npm run build` first, or use `npm run dev`" });
-  res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
+  // No other site may frame the board (it could trick a click into an approval or the terminal).
+  res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream", "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" });
   res.end(readFileSync(file));
 }
 
@@ -442,7 +487,7 @@ const server = createServer(async (req, res) => {
     if (mcp) {
       if (req.method !== "POST") return send(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null });
       const rt = boards.get(mcp[1]);
-      return await handleMcp(rt.board, { workspace: rt.meta.workspace, browserRpc: rt.browserRpc.bind(rt), library }, req, res, await readBody(req));
+      return await handleMcp(rt.board, { workspace: rt.meta.workspace, browserRpc: rt.browserRpc.bind(rt), library, browsers: rt.browsers }, req, res, await readBody(req));
     }
     const scoped = /^\/api\/b\/([\w-]+)(\/.*)$/.exec(url.pathname);
     if (scoped) {
@@ -485,9 +530,44 @@ server.on("upgrade", (req, socket, head) => {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
     return socket.destroy();
   }
+  if (url.pathname === "/ws/browser") {
+    const toolId = url.searchParams.get("tool") ?? "";
+    let ok = false;
+    try {
+      ok = rt.board.getTool(toolId).kind === "browser";
+    } catch {}
+    if (!ok) {
+      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+      return socket.destroy();
+    }
+    return wss.handleUpgrade(req, socket, head, (ws) => attachBrowser(rt, toolId, ws));
+  }
   if (url.pathname !== "/ws/pty" && url.pathname !== "/ws/board") return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => (url.pathname === "/ws/pty" ? attachPty(rt, ws) : attachBoard(rt, ws)));
 });
+
+/** A board view of one browser tool: page frames (binary) out, the person's mouse/keys/navigation (JSON) in. */
+function attachBrowser(rt: BoardRuntime, toolId: string, ws: WebSocket) {
+  let bt;
+  try {
+    bt = rt.browsers.get(toolId);
+  } catch {
+    return ws.close();
+  }
+  const view = bt;
+  void view.addViewer(ws);
+  ws.on("message", (raw, isBinary) => {
+    if (isBinary) return;
+    let msg: any;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+    view.handleViewerMessage(ws, msg);
+  });
+  ws.on("close", () => view.removeViewer(ws));
+}
 
 function attachPty(rt: BoardRuntime, ws: WebSocket) {
   const shell = rt.shell;
@@ -556,6 +636,7 @@ server.listen(PORT, HOST, () => {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     boards.disposeAll();
+    browsers.dispose();
     process.exit(0);
   });
 }

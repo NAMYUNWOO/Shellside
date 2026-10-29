@@ -4,13 +4,14 @@ import { useEffect, useState } from "react";
 import type { ChecklistItem, FormField, TableColumn, Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { AppFrame } from "./AppFrame.tsx";
+import { BrowserView } from "./BrowserView.tsx";
 import { useT } from "./i18n.tsx";
 
 type Patch = (ops: unknown[]) => Promise<void>;
 const newId = (prefix: string) => `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
 /** The working surface of a tool, drawn inside its canvas frame. */
-export function ToolBody({ tool, onNotice, onAppErrors }: { tool: Tool; onNotice: (m: string) => void; onAppErrors: (n: number) => void }) {
+export function ToolBody({ tool, selected = false, onNotice, onAppErrors }: { tool: Tool; selected?: boolean; onNotice: (m: string) => void; onAppErrors: (n: number) => void }) {
   const api = useApi();
   const t = useT();
   const patch: Patch = async (ops) => {
@@ -31,6 +32,8 @@ export function ToolBody({ tool, onNotice, onAppErrors }: { tool: Tool; onNotice
       return <NoteTool tool={tool} patch={patch} />;
     case "app":
       return <AppFrame tool={tool} onNotice={onNotice} onErrors={onAppErrors} />;
+    case "browser":
+      return <BrowserView tool={tool} selected={selected} onNotice={onNotice} />;
     default:
       return <p className="muted">{t(`Unknown tool kind: ${tool.kind}`, `알 수 없는 도구 형식: ${tool.kind}`)}</p>;
   }

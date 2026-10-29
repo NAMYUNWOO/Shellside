@@ -182,12 +182,17 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     if (made.length) setSelectedIds(made);
   };
 
-  const addTool = async (kind: "note" | "checklist", at = cam.center()) => {
+  const addTool = async (kind: "note" | "checklist" | "browser", at = cam.center()) => {
     try {
       const created = await api.createTool(
-        kind === "note" ? { kind, title: t("Note", "메모"), state: { text: "" }, at } : { kind, title: t("Checklist", "체크리스트"), state: { items: [] }, at },
+        kind === "note"
+          ? { kind, title: t("Note", "메모"), state: { text: "" }, at }
+          : kind === "browser"
+            ? { kind, title: t("Browser", "브라우저"), state: { url: "about:blank" } } // big: goes to a free spot, the camera follows
+            : { kind, title: t("Checklist", "체크리스트"), state: { items: [] }, at },
       );
       setSelectedIds([created.id]);
+      if (kind === "browser") window.setTimeout(() => cam.focusTool(created.id), 80);
     } catch (err) {
       onNotice((err as Error).message);
     }
@@ -239,6 +244,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       return [
         { label: t("+ Note here", "+ 메모 여기에"), onSelect: () => addTool("note", m.at) },
         { label: t("+ Checklist here", "+ 체크리스트 여기에"), onSelect: () => addTool("checklist", m.at) },
+        { label: t("+ Browser here", "+ 브라우저 여기에"), onSelect: () => addTool("browser", m.at) },
         { label: libraryOpen ? t("Close library", "라이브러리 닫기") : t("Open library", "라이브러리 열기"), onSelect: () => setLibraryOpen(!libraryOpen) },
         { separator: true },
         { label: t("Send to Claude…", "Claude에게 보내기…"), onSelect: () => setSendIds([]) },
@@ -545,7 +551,7 @@ function CommandBar({
   tool: "select" | "hand";
   onTool: (t: "select" | "hand") => void;
   selected: Tool[];
-  onAdd: (k: "note" | "checklist") => void;
+  onAdd: (k: "note" | "checklist" | "browser") => void;
   onSend: (prompt: string) => Promise<void>;
   onNotice: (m: string) => void;
 }) {
@@ -602,6 +608,9 @@ function CommandBar({
       </button>
       <button className="ghost" onClick={() => onAdd("checklist")} title={t("Add a checklist in the middle of the view", "화면 가운데에 체크리스트 추가")}>
         {t("+ Checklist", "+ 체크리스트")}
+      </button>
+      <button className="ghost" onClick={() => onAdd("browser")} title={t("Add a web browser you and Claude share", "나와 Claude가 함께 쓰는 웹 브라우저 추가")}>
+        {t("+ Browser", "+ 브라우저")}
       </button>
       <span className="sep" />
       {selected.length > 0 && (

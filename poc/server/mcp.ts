@@ -8,12 +8,14 @@ import { CATALOG_DOC, TOOL_KINDS, describeValue, formField, type Tool } from "..
 import { Board, BoardError } from "./board.ts";
 import { loadSource } from "./apps.ts";
 import type { Library } from "./library.ts";
+import type { BoardBrowsers } from "./browser.ts";
 
 export interface McpContext {
   workspace: string;
   /** Ask the board open in a browser to run something inside an app iframe. */
   browserRpc: (method: "app_snapshot" | "app_invoke", toolId: string, params: unknown, timeoutMs?: number) => Promise<unknown>;
   library: Library;
+  browsers: BoardBrowsers;
 }
 
 /** What the agent sees of a tool: everything but the compiled bundle. */
@@ -37,7 +39,9 @@ function summarize(t: Tool) {
           ? { submitted: s.submitted }
           : t.kind === "app"
             ? { stateKeys: Object.keys(s ?? {}).slice(0, 20), sourcePath: t.props.sourcePath }
-            : { chars: s.text?.length ?? 0 };
+            : t.kind === "browser"
+              ? { url: s.url, pageTitle: s.title, control: s.control, tabs: s.tabs?.length ?? 0 }
+              : { chars: s.text?.length ?? 0 };
   return { id: t.id, title: t.title, kind: t.kind, description: t.description, version: t.version, agentAccess: t.agentAccess, updatedBy: t.updatedBy, ...counts };
 }
 
@@ -48,7 +52,8 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
       instructions:
         "WorkBoard is the person's tool board next to this terminal. Tools (checklists, forms, tables, notes, apps) are JSON you can read and write. " +
         "Use it to show progress, ask for approval or structured input, and pick up what the person changed. Call board_catalog once to learn the tool shapes. " +
-        "Apps share data live through channels (useChannel) and can read any tool (useTool): connect apps that way instead of merging them or relaying data yourself.",
+        "Apps share data live through channels (useChannel) and can read any tool (useTool): connect apps that way instead of merging them or relaying data yourself. " +
+        "For web pages, use the board browser (browser_open, browser_snapshot, browser_act): the person watches and can take over.",
     },
   );
 
@@ -63,6 +68,15 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
     }
     return { content };
   };
+
+  /** Plain text blocks (snapshots read better unescaped), plus the pending-events note. */
+  const replyText = (...texts: string[]) => {
+    const content = texts.filter(Boolean).map((text) => ({ type: "text" as const, text }));
+    const pending = board.undeliveredForAgent();
+    if (pending.length) content.push({ type: "text" as const, text: `[board] ${pending.length} new event(s) from the person (latest: "${pending.at(-1)!.summary}"). Call board_wait_event to read them.` });
+    return { content };
+  };
+  const fail = (err: unknown) => ({ isError: true, content: [{ type: "text" as const, text: err instanceof BoardError ? err.message : `internal error: ${(err as Error).message}` }] });
 
   const run = async (fn: () => unknown | Promise<unknown>) => {
     try {
@@ -292,6 +306,123 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
       run(() => {
         board.deleteChannel("agent", name);
         return { ok: true };
+      }),
+  );
+
+  // ── the board browser: a real Chrome tab the person watches and can take over ──
+  const browserId = z.string().optional().describe("The browser tool's id. Optional when the board has exactly one browser.");
+  const step = z.record(z.string(), z.any()).describe('One action, e.g. {"click": "@12"}, {"fill": "@5", "text": "hi"}, {"press": "Enter"}');
+
+  server.registerTool(
+    "browser_open",
+    {
+      description:
+        "Open a web address in the board browser and return a text snapshot of the page. Without toolId a new browser appears on the board " +
+        "(the person sees it live); with toolId the existing browser goes there. Use this, not curl or a hidden browser, when the person should see or help with the page.",
+      inputSchema: {
+        url: z.string().min(1).max(8000).describe("https://…, or a domain like example.com"),
+        toolId: z.string().optional().describe("Reuse this browser instead of adding a new one"),
+        title: z.string().max(120).optional(),
+        width: z.number().int().min(320).max(1600).optional().describe("Frame width (default 960)"),
+        height: z.number().int().min(260).max(2000).optional().describe("Frame height (default 640)"),
+        snapshot: z.boolean().optional().describe("Return a page snapshot (default true)"),
+      },
+    },
+    async ({ url, toolId, title, width, height, snapshot }) => {
+      try {
+        const bt = await ctx.browsers.open("agent", { url, toolId, title, width, height });
+        if (snapshot === false) return replyText(JSON.stringify({ toolId: bt.toolId, url: bt.tab?.url, title: bt.tab?.title }));
+        const snap = await bt.snapshot("agent", { maxChars: 12000 });
+        return replyText(`toolId: ${bt.toolId}`, snap.text);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "browser_snapshot",
+    {
+      description:
+        "Read the board browser's current page as text. Things you can act on appear as [@N role \"name\" …]; pass them to browser_act. " +
+        "Narrow big pages with selector (CSS) or interactive: true (only the controls).",
+      inputSchema: {
+        toolId: browserId,
+        selector: z.string().max(500).optional(),
+        interactive: z.boolean().optional(),
+        maxChars: z.number().int().min(1000).max(60000).optional().describe("Default 20000"),
+      },
+    },
+    async ({ toolId, selector, interactive, maxChars }) => {
+      try {
+        const snap = await ctx.browsers.pick(toolId).snapshot("agent", { selector, interactive, maxChars });
+        return replyText(`toolId: ${snap.toolId}`, snap.text);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "browser_act",
+    {
+      description:
+        "Drive the board browser: run a list of steps in order (stops at the first failure) and get a fresh snapshot back. Batch the steps you are sure of in one call. " +
+        "Targets: @N (from the latest snapshot), css:<selector> or text:<visible text>. Steps: goto, click, dblclick, fill {fill, text, enter?}, type, press (Enter, Tab, Meta+A…), " +
+        "select {select, value}, check, uncheck, hover, scroll (down|up|top|bottom|target), wait (ms), waitFor {waitFor, timeout?, gone?}, waitUrl, back, forward, reload, " +
+        "eval (page JavaScript; returns the value), upload {upload, files: [paths in the workspace]}, dialog (accept|dismiss, text?), newTab (url), tab (number), closeTab. " +
+        "The person sees each action on the board. For sign-ins, CAPTCHAs or payments use browser_handoff instead.",
+      inputSchema: {
+        toolId: browserId,
+        steps: z.array(step).min(1).max(60),
+        snapshot: z.boolean().optional().describe("Return a snapshot after the steps (default true)"),
+        maxChars: z.number().int().min(1000).max(60000).optional().describe("Snapshot size limit (default 12000)"),
+      },
+    },
+    async ({ toolId, steps, snapshot, maxChars }) => {
+      try {
+        const r: any = await ctx.browsers.pick(toolId).act("agent", steps, { snapshot, maxChars });
+        const { snapshot: snap, ...rest } = r;
+        return replyText(JSON.stringify(rest, null, 2), typeof snap === "string" ? snap : "");
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "browser_screenshot",
+    {
+      description: "A picture of the board browser's page (what the person sees). Use it when layout, images or charts matter; for text and controls a snapshot is cheaper.",
+      inputSchema: { toolId: browserId, fullPage: z.boolean().optional().describe("The whole page, not just the visible part") },
+    },
+    async ({ toolId, fullPage }) => {
+      try {
+        const shot = await ctx.browsers.pick(toolId).screenshot("agent", { fullPage, format: fullPage ? "jpeg" : "png" });
+        return { content: [{ type: "image" as const, data: shot.data.toString("base64"), mimeType: shot.mimeType }, { type: "text" as const, text: `${shot.title || "(untitled)"} · ${shot.url} · ${shot.width}×${shot.height}` }] };
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "browser_handoff",
+    {
+      description:
+        "Hand the board browser to the person for a step only they should do (sign in, CAPTCHA, two-factor code, payment, cookie choices) and WAIT. " +
+        "Say exactly what they should do. Their answer comes back when they hand it back; then take a snapshot and continue. " +
+        "If the wait times out, the result is pending: call board_wait_answer with the askId.",
+      inputSchema: {
+        toolId: browserId,
+        message: z.string().min(1).max(2000).describe('What the person should do, e.g. "Sign in to GitHub, then hand the browser back."'),
+        timeoutSec: z.number().int().min(5).max(600).optional().describe("Default 300"),
+      },
+    },
+    async ({ toolId, message, timeoutSec }, extra) =>
+      run(async () => {
+        const a = await ctx.browsers.pick(toolId).handoff(message, timeoutSec ?? 300, extra.signal);
+        return askResult(a);
       }),
   );
 
