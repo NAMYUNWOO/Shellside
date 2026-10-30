@@ -13,7 +13,7 @@ reads what you change, reports progress as it works, and stops to ask you before
 
 ## Demo: one request, a live browser, two linked apps
 
-[![Shellside demo: Claude Code in the board's terminal drives a browser, builds a table app and a chart app, and links them](docs/media/shellside-demo.gif)](docs/media/shellside-demo.mp4)
+[![Shellside demo: Claude Code in the board's terminal drives a browser, creates a table app and a chart app for the request, and links them](docs/media/shellside-demo.gif)](docs/media/shellside-demo.mp4)
 
 **[▶ Watch the full video (MP4, 1080p)](docs/media/shellside-demo.mp4)**
 
@@ -21,12 +21,14 @@ reads what you change, reports progress as it works, and stops to ask you before
    **Start Claude Code** starts Claude Code in it, already connected to this board through the board's MCP server.
 2. **Ask in the terminal, as usual.** *"Open the Wikipedia list of the tallest buildings in the board browser. Put the top 8
    in an editable table app and add a bar chart app that follows the table live. Link browser -> table -> chart."*
-3. **Claude works on the board while you watch.** It drives a real Chrome tab on the board, writes two React apps
-   (a table and a chart that read the same live data), and links them with arrows that show the flow.
+3. **Claude works on the board while you watch.** It drives a real Chrome tab on the board, then **creates new app
+   components for this request**: nothing was prebuilt. It writes the React code for an editable table and a live chart
+   (the chart reads the table's data), the board compiles and runs them in sandboxed frames at once, and Claude links
+   them with arrows that show the flow.
 4. **You edit, the chart follows.** Change a height in the table and the chart redraws at once. You and Claude work on the
    same state.
 5. **Ask from the board too.** Type `@name` in the box at the bottom to point at a tool. The request lands in the same
-   Claude Code session in the terminal, and Claude updates the app it built.
+   Claude Code session in the terminal, and Claude changes the app it created.
 
 ## What it looks like
 
