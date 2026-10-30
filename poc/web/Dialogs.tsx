@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import type { Tool } from "../shared/catalog.ts";
 import { useApi, ApiError, type AgentStatus } from "./api.ts";
 import { kindLabel, useT, type T } from "./i18n.tsx";
-import { ClaudeMark } from "./TerminalButton.tsx";
+import { ShellsideMark } from "./ShellsideMark.tsx";
 
 function Modal({ title, onClose, children }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode }) {
   const t = useT();
@@ -80,7 +80,7 @@ export function SendToClaudeDialog({
       onClose={onClose}
       title={
         <>
-          <ClaudeMark size={20} /> {t("Send to Claude", "Claude에게 보내기")}
+          <ShellsideMark size={20} /> {t("Send to Claude", "Claude에게 보내기")}
         </>
       }
     >

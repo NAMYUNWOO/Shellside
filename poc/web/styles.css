@@ -1180,7 +1180,7 @@ body.wb-panning iframe,
 .term-btn.state-busy .term-glyph-bar i:first-child {
   background: #5fcf8f;
 }
-.term-btn.state-starting .claude-mark {
+.term-btn.state-starting .shell-mark {
   opacity: 0.45;
 }
 .term-glyph-screen {
@@ -1192,9 +1192,10 @@ body.wb-panning iframe,
   font: 700 10px/1 ui-monospace, Menlo, monospace;
   color: #d4d4d4;
 }
-.claude-mark {
+.shell-mark {
   display: inline-block;
   vertical-align: middle;
+  flex-shrink: 0; /* keep its size in a row next to long text (the sign-in notice) */
 }
 .activity-dot {
   position: absolute;

@@ -1,25 +1,8 @@
-// Top-right terminal button: a tiny terminal window. The Claude mark appears only when Claude actually runs
+// Top-right terminal button: a tiny terminal window. The Shellside mark appears only when Claude actually runs
 // in this board's terminal; a stored login alone does not count.
 import { loginProblem, type AgentStatus } from "./api.ts";
 import { useT, type T } from "./i18n.tsx";
-
-/** Pixel-art Claude critter, in Claude's orange. */
-export function ClaudeMark({ size = 18 }: { size?: number }) {
-  // 10 × 7 grid: body with two eyes, arms on row 3, four legs.
-  const px: [number, number][] = [];
-  for (let x = 1; x <= 8; x++) px.push([x, 0]);
-  for (const y of [1, 2]) for (let x = 1; x <= 8; x++) if (x !== 2 && x !== 7) px.push([x, y]);
-  for (let x = 0; x <= 9; x++) px.push([x, 3]);
-  for (let x = 1; x <= 8; x++) px.push([x, 4]);
-  for (const x of [1, 3, 6, 8]) px.push([x, 5]);
-  return (
-    <svg className="claude-mark" width={size} height={(size * 7) / 10} viewBox="0 0 10 7" role="img" aria-label="Claude" shapeRendering="crispEdges">
-      {px.map(([x, y]) => (
-        <rect key={`${x}-${y}`} x={x} y={y} width={1} height={1} fill="#D97757" />
-      ))}
-    </svg>
-  );
-}
+import { ShellsideMark } from "./ShellsideMark.tsx";
 
 function describe(status: AgentStatus | null, t: T): string {
   const term = t("Terminal", "터미널");
@@ -56,7 +39,7 @@ export function TerminalButton({ open, status, activity, onClick }: { open: bool
           <i />
           <i />
         </span>
-        <span className="term-glyph-screen">{showMark ? <ClaudeMark /> : <span className="term-prompt">&gt;_</span>}</span>
+        <span className="term-glyph-screen">{showMark ? <ShellsideMark size={14} /> : <span className="term-prompt">&gt;_</span>}</span>
       </span>
       {needsLogin || state === "permission" ? (
         <span className="term-alert" aria-hidden>

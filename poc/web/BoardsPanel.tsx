@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { BoardSummary } from "./api.ts";
 import { ContextMenu } from "./ContextMenu.tsx";
 import { agentStateLabel, LangSwitch, useT } from "./i18n.tsx";
-import { ClaudeMark } from "./TerminalButton.tsx";
+import { ShellsideMark } from "./ShellsideMark.tsx";
 
 interface BoardsPanelProps {
   boards: BoardSummary[];
@@ -91,7 +91,7 @@ export function BoardsPanel(props: BoardsPanelProps) {
                 <span className="board-item-meta">
                   {b.claudeRunning ? (
                     <span className={`session on state-${b.agentState}`}>
-                      <ClaudeMark size={12} /> {agentStateLabel(b.agentState, t)}
+                      <ShellsideMark size={13} /> {agentStateLabel(b.agentState, t)}
                     </span>
                   ) : (
                     <span className="session">{b.shellRunning ? t("shell", "셸") : t("idle", "대기")}</span>
