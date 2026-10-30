@@ -1775,6 +1775,20 @@ body.wb-panning iframe,
 .react-flow__edge-path.link-line.selected {
   stroke: var(--accent);
 }
+/* Direction: arrowheads at the ends a link points to, the same colour as the line. */
+.link-arrow {
+  fill: var(--link);
+  stroke: var(--link);
+  stroke-width: 1;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: visiblePainted; /* React Flow edges only take the pointer on strokes; a head is a filled shape */
+}
+.react-flow__edge:hover .link-arrow,
+.link-arrow.selected {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
 
 .flow-wrap {
   width: 100%;
