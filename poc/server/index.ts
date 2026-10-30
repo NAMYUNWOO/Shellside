@@ -599,7 +599,12 @@ function attachPty(rt: BoardRuntime, ws: WebSocket) {
     if (!fresh) {
       if (resize) shell.resize(cols, rows); // hidden panes attach without taking over the size
       const replay = shell.replayBuffer();
-      if (replay.length) ws.send(replay);
+      if (replay.length) {
+        // Marked, so the page can tell old output from new: queries in it (e.g. "what terminal are you?") were answered
+        // long ago, and answering them again would type the answers into whatever runs now.
+        ws.send(JSON.stringify({ t: "replay" }));
+        ws.send(replay);
+      }
     }
     offData?.();
     offExit?.();

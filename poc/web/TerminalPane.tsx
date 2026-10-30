@@ -36,6 +36,8 @@ export function TerminalPane({ boardId, boardName, onNotice, visible, maximized,
   activityRef.current = onActivity;
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  // True while replayed output is written: the terminal's answers to old queries in it must not reach the shell.
+  const muted = useRef(false);
 
 
   const send = useCallback((msg: unknown) => {
@@ -55,6 +57,7 @@ export function TerminalPane({ boardId, boardName, onNotice, visible, maximized,
     let closed = false;
     let retry = 0;
     let first = true;
+    let replayNext = false;
     let timer: number | undefined;
     const connect = () => {
       const ws = new WebSocket(wsUrl(`/ws/pty?board=${encodeURIComponent(boardId)}`));
@@ -81,9 +84,20 @@ export function TerminalPane({ boardId, boardName, onNotice, visible, maximized,
             );
             wt.write(`\r\n\x1b[2m[${note}]\x1b[0m\r\n`);
           }
+          if (msg.t === "replay") replayNext = true;
           return;
         }
-        wt.write(new Uint8Array(e.data as ArrayBuffer));
+        const bytes = new Uint8Array(e.data as ArrayBuffer);
+        if (replayNext) {
+          // wterm answers queries while it writes, so muting around the write drops exactly those answers.
+          replayNext = false;
+          muted.current = true;
+          try {
+            wt.write(bytes);
+          } finally {
+            muted.current = false;
+          }
+        } else wt.write(bytes);
         activityRef.current();
       };
       ws.onclose = () => {
@@ -182,7 +196,7 @@ export function TerminalPane({ boardId, boardName, onNotice, visible, maximized,
           autoResize
           aria-label={t("Work shell", "작업 셸")}
           onReady={setWt}
-          onData={(d) => send({ t: "in", d })}
+          onData={(d) => !muted.current && send({ t: "in", d })}
           onResize={(cols, rows) => visibleRef.current && send({ t: "resize", cols, rows })}
         />
       </div>
