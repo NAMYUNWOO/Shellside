@@ -456,6 +456,15 @@ async function saveUpload(rt: BoardRuntime, req: IncomingMessage, url: URL) {
   return meta;
 }
 
+// ── open source notices (written by `vite build`, see build.license in vite.config.ts) ──
+const LICENSES = "third-party-licenses.md";
+function serveLicenses(res: ServerResponse) {
+  const file = join(DIST, LICENSES);
+  const found = existsSync(file);
+  res.writeHead(found ? 200 : 404, { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff", "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" });
+  res.end(found ? readFileSync(file) : `The open source list of the board UI is written by \`npm run build\` (dist/${LICENSES}). Run it once, then reload.\n`);
+}
+
 // ── static files (production build) ─────────────────────────────────────────
 const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".wasm": "application/wasm", ".json": "application/json", ".ico": "image/x-icon" };
 function serveStatic(url: URL, res: ServerResponse) {
@@ -513,6 +522,7 @@ const server = createServer(async (req, res) => {
       if (!hit) send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
       return;
     }
+    if (url.pathname === `/${LICENSES}` && req.method === "GET") return serveLicenses(res);
     if (PROD) return serveStatic(url, res);
     send(res, 404, { error: "dev mode: open the Vite app at http://127.0.0.1:5173" });
   } catch (err) {

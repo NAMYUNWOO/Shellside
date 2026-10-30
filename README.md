@@ -142,4 +142,9 @@ docs/images/         screenshots used in this README
 ```
 
 Built with [wterm](https://github.com/vercel-labs/wterm), [React Flow](https://reactflow.dev), the
-[MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), sucrase, esbuild and node-pty.
+[MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk), sucrase, esbuild and node-pty. Their licenses
+are listed in [poc/README.md](poc/README.md#open-source-used).
+
+## License
+
+[MIT](LICENSE)

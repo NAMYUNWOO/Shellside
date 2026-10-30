@@ -183,7 +183,23 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 
 ## Open source used
 
-wterm (Apache-2.0), React Flow `@xyflow/react` (MIT), MCP TypeScript SDK, sucrase, esbuild, node-pty, fast-json-patch.
+| Package | License | Used for |
+| --- | --- | --- |
+| wterm (`@wterm/core`, `@wterm/dom`, `@wterm/react`) | Apache-2.0 | The board terminal |
+| React Flow (`@xyflow/react`) | MIT | The canvas |
+| React, ReactDOM | MIT | The board UI and the app sandbox runtime |
+| MCP TypeScript SDK (`@modelcontextprotocol/sdk`) | MIT | The agent's workboard tools |
+| sucrase | MIT | Compiling the apps the agent writes |
+| esbuild | MIT | Bundling the app sandbox runtime |
+| node-pty | MIT | The terminal process |
+| ws | MIT | WebSockets (terminal, live board, board browser) |
+| zod | MIT | Checking tool input |
+| fast-json-patch | MIT | State patches |
+
+- **Full list:** `npm run build` writes `dist/third-party-licenses.md`. It lists every package bundled into the board UI with its license text, including the ones that come in through React Flow: d3 modules (ISC; d3-ease BSD-3-Clause) and zustand (MIT). The server serves it at `/third-party-licenses.md`, and the boards panel links to it ("Open source licenses"). The app sandbox runtime keeps React's own license headers.
+- **Not bundled:** the board browser drives the Chrome installed on the machine. Its design follows [ego-lite](https://github.com/citrolabs/ego-lite) (MIT), but no code was copied from it.
+- **Build tools only** (TypeScript, Vite and its lightningcss under MPL-2.0, tsx, concurrently): not shipped.
+- **This project:** [MIT](../LICENSE).
 
 ## wterm modification candidates
 

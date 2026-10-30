@@ -1830,6 +1830,19 @@ body.wb-panning iframe,
   justify-content: space-between;
   gap: 8px;
 }
+.boards-foot-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.boards-foot-text a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.boards-foot-text a:hover {
+  color: var(--text);
+}
 
 /* ── board browser: a live Chrome tab in a frame ─────────────────────────── */
 .frame.browser-frame {

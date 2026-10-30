@@ -108,7 +108,12 @@ export function BoardsPanel(props: BoardsPanelProps) {
         ))}
       </ul>
       <div className="boards-foot muted">
-        <span>{t("Each board has its own terminal and Claude session.", "보드마다 터미널과 Claude 세션이 따로 있습니다.")}</span>
+        <span className="boards-foot-text">
+          <span>{t("Each board has its own terminal and Claude session.", "보드마다 터미널과 Claude 세션이 따로 있습니다.")}</span>
+          <a href="/third-party-licenses.md" target="_blank" rel="noopener noreferrer">
+            {t("Open source licenses", "오픈소스 라이선스")}
+          </a>
+        </span>
         <LangSwitch />
       </div>
       {menu && (
