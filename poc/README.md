@@ -24,7 +24,7 @@ Open <http://127.0.0.1:5173>. The server listens only on `127.0.0.1:4100`.
 | Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Wheel / pinch = zoom (a scroll that starts over a browser page scrolls the page), Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width (a browser frame: its sides and bottom corners) |
 | **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy name · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here / + Browser here |
 | Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
-| Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Claude mark inside the button when signed in to Claude, and `!` when a permission prompt is waiting |
+| Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Shellside mark (a nautilus shell) inside the button while Claude runs in this board's terminal, and `!` when a permission prompt is waiting |
 | Bottom: **Input box** | Sends straight to Claude, with the selected components attached as context. `@` suggests components by name; the ones you name are attached too |
 | **Library** | Saved components. Click one or drag it onto the canvas to reuse it |
 
@@ -183,7 +183,23 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 
 ## Open source used
 
-wterm (Apache-2.0), React Flow `@xyflow/react` (MIT), MCP TypeScript SDK, sucrase, esbuild, node-pty, fast-json-patch.
+| Package | License | Used for |
+| --- | --- | --- |
+| wterm (`@wterm/core`, `@wterm/dom`, `@wterm/react`) | Apache-2.0 | The board terminal |
+| React Flow (`@xyflow/react`) | MIT | The canvas |
+| React, ReactDOM | MIT | The board UI and the app sandbox runtime |
+| MCP TypeScript SDK (`@modelcontextprotocol/sdk`) | MIT | The agent's workboard tools |
+| sucrase | MIT | Compiling the apps the agent writes |
+| esbuild | MIT | Bundling the app sandbox runtime |
+| node-pty | MIT | The terminal process |
+| ws | MIT | WebSockets (terminal, live board, board browser) |
+| zod | MIT | Checking tool input |
+| fast-json-patch | MIT | State patches |
+
+- **Full list:** `npm run build` writes `dist/third-party-licenses.md`. It lists every package bundled into the board UI with its license text, including the ones that come in through React Flow: d3 modules (ISC; d3-ease BSD-3-Clause) and zustand (MIT). The server serves it at `/third-party-licenses.md`, and the boards panel links to it ("Open source licenses"). The app sandbox runtime keeps React's own license headers.
+- **Not bundled:** the board browser drives the Chrome installed on the machine. Its design follows [ego-lite](https://github.com/citrolabs/ego-lite) (MIT), but no code was copied from it.
+- **Build tools only** (TypeScript, Vite and its lightningcss under MPL-2.0, tsx, concurrently): not shipped.
+- **This project:** [MIT](../LICENSE).
 
 ## wterm modification candidates
 

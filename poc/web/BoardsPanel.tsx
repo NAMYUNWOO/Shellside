@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { BoardSummary } from "./api.ts";
 import { ContextMenu } from "./ContextMenu.tsx";
 import { agentStateLabel, LangSwitch, useT } from "./i18n.tsx";
-import { ClaudeMark } from "./TerminalButton.tsx";
+import { ShellsideMark } from "./ShellsideMark.tsx";
 
 interface BoardsPanelProps {
   boards: BoardSummary[];
@@ -91,7 +91,7 @@ export function BoardsPanel(props: BoardsPanelProps) {
                 <span className="board-item-meta">
                   {b.claudeRunning ? (
                     <span className={`session on state-${b.agentState}`}>
-                      <ClaudeMark size={12} /> {agentStateLabel(b.agentState, t)}
+                      <ShellsideMark size={13} /> {agentStateLabel(b.agentState, t)}
                     </span>
                   ) : (
                     <span className="session">{b.shellRunning ? t("shell", "셸") : t("idle", "대기")}</span>
@@ -108,7 +108,12 @@ export function BoardsPanel(props: BoardsPanelProps) {
         ))}
       </ul>
       <div className="boards-foot muted">
-        <span>{t("Each board has its own terminal and Claude session.", "보드마다 터미널과 Claude 세션이 따로 있습니다.")}</span>
+        <span className="boards-foot-text">
+          <span>{t("Each board has its own terminal and Claude session.", "보드마다 터미널과 Claude 세션이 따로 있습니다.")}</span>
+          <a href="/third-party-licenses.md" target="_blank" rel="noopener noreferrer">
+            {t("Open source licenses", "오픈소스 라이선스")}
+          </a>
+        </span>
         <LangSwitch />
       </div>
       {menu && (

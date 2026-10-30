@@ -15,7 +15,14 @@ export default defineConfig({
       "/api": { target },
       "/ws": { target, ws: true },
       "/sandbox": { target },
+      "/third-party-licenses.md": { target },
     },
   },
-  build: { outDir: "dist", emptyOutDir: true },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    // Every package bundled into the board UI, with its license text (MIT, ISC, BSD and Apache-2.0 ask for it).
+    // The server serves it at /third-party-licenses.md; the boards panel links to it.
+    license: { fileName: "third-party-licenses.md" },
+  },
 });

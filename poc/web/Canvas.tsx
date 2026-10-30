@@ -8,7 +8,6 @@ import {
   ConnectionMode,
   Controls,
   Handle,
-  MarkerType,
   MiniMap,
   NodeResizeControl,
   Position,
@@ -149,7 +148,7 @@ export function BoardCanvas(props: BoardCanvasProps) {
     });
   }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice, linking]);
 
-  // Board links → React Flow edges. Selection stays React Flow's; the arrowheads (direction) follow each link's colour.
+  // Board links → React Flow edges. Selection stays React Flow's; LinkLine draws the direction.
   const [edges, setEdges] = useState<LinkEdge[]>([]);
   useEffect(() => {
     setEdges((prev) => {
@@ -159,15 +158,6 @@ export function BoardCanvas(props: BoardCanvasProps) {
         .map((l) => ({ id: l.id, source: l.from, target: l.to, type: "link", selected: !!was.get(l.id), data: { direction: l.direction } }) as LinkEdge);
     });
   }, [props.links, tools]);
-  const shownEdges = useMemo(
-    () =>
-      edges.map((e) => {
-        const d = e.data?.direction ?? "none";
-        const arrow = { type: MarkerType.ArrowClosed, width: 16, height: 16, color: e.selected ? "var(--accent)" : "var(--link)" };
-        return { ...e, markerEnd: d !== "none" ? arrow : undefined, markerStart: d === "both" ? arrow : undefined };
-      }),
-    [edges],
-  );
   const onEdgesChange = useCallback((changes: EdgeChange<LinkEdge>[]) => {
     // Links are removed from their menu or with Delete (BoardPanel), never by React Flow itself.
     setEdges((eds) => applyEdgeChanges(changes.filter((c) => c.type === "select"), eds));
@@ -216,7 +206,7 @@ export function BoardCanvas(props: BoardCanvasProps) {
     <div ref={wrapRef} className="flow-wrap">
     <ReactFlow<FrameNode, LinkEdge>
       nodes={nodes}
-      edges={shownEdges}
+      edges={edges}
       nodeTypes={nodeTypes}
       edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}
@@ -318,36 +308,63 @@ export function BoardCanvas(props: BoardCanvasProps) {
 }
 
 // ── links ──
-/** Where the line from a frame's centre towards a point leaves the frame. */
-function borderPoint(n: InternalNode, toward: { x: number; y: number }, gap: number) {
-  const w = n.measured.width ?? 0;
-  const h = n.measured.height ?? 0;
-  const cx = n.internals.positionAbsolute.x + w / 2;
-  const cy = n.internals.positionAbsolute.y + h / 2;
+/** A frame's box on the board, with its label above it (the label keeps its size on screen: `top` is its height). */
+function frameBox(n: InternalNode, top: number) {
+  const { x, y } = n.internals.positionAbsolute;
+  return { x, y: y - top, w: n.measured.width ?? 0, h: (n.measured.height ?? 0) + top };
+}
+/** Where the line from a box's centre towards a point leaves the box, `gap` outside it. */
+function borderPoint(r: { x: number; y: number; w: number; h: number }, toward: { x: number; y: number }, gap: number) {
+  const cx = r.x + r.w / 2;
+  const cy = r.y + r.h / 2;
   const dx = toward.x - cx;
   const dy = toward.y - cy;
   if (!dx && !dy) return { x: cx, y: cy };
-  const s = Math.min(dx ? (w / 2 + gap) / Math.abs(dx) : Infinity, dy ? (h / 2 + gap) / Math.abs(dy) : Infinity);
+  const s = Math.min(dx ? (r.w / 2 + gap) / Math.abs(dx) : Infinity, dy ? (r.h / 2 + gap) / Math.abs(dy) : Infinity);
   return { x: cx + dx * s, y: cy + dy * s };
 }
-const centre = (n: InternalNode) => ({ x: n.internals.positionAbsolute.x + (n.measured.width ?? 0) / 2, y: n.internals.positionAbsolute.y + (n.measured.height ?? 0) / 2 });
+const centre = (r: { x: number; y: number; w: number; h: number }) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 
-/** A straight line between two frames' edges, aimed centre to centre (it follows the frames as they move). */
-function LinkLine({ id, source, target, markerStart, markerEnd, selected }: EdgeProps<LinkEdge>) {
+/** Arrowhead size, the gap to a frame and the frame label's height, in screen pixels (they look the same at any zoom). */
+const ARROW = { length: 13, halfWidth: 5.5, gap: 4, label: 23 };
+
+/** A straight line between two frames' edges, aimed centre to centre (it follows the frames as they move).
+ *  An arrowhead at an end shows the link points that way. */
+function LinkLine({ id, source, target, data, selected }: EdgeProps<LinkEdge>) {
   const a = useInternalNode(source);
   const b = useInternalNode(target);
+  const zoom = useStore((s) => s.transform[2]);
   if (!a || !b) return null;
-  const p = borderPoint(a, centre(b), 6);
-  const q = borderPoint(b, centre(a), 6);
+  const px = 1 / zoom; // one screen pixel in board units
+  const ra = frameBox(a, ARROW.label * px);
+  const rb = frameBox(b, ARROW.label * px);
+  const p = borderPoint(ra, centre(rb), ARROW.gap * px);
+  const q = borderPoint(rb, centre(ra), ARROW.gap * px);
+  const dir = data?.direction ?? "none";
+  const atTo = dir !== "none";
+  const atFrom = dir === "both";
+  const dx = q.x - p.x;
+  const dy = q.y - p.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const u = { x: dx / dist, y: dy / dist };
+  // Short lines (frames close together) get smaller heads, so two never overlap.
+  const len = Math.min(ARROW.length * px, dist / (atFrom ? 2.2 : 1.1));
+  const half = (len / (ARROW.length * px)) * ARROW.halfWidth * px;
+  const head = (tip: { x: number; y: number }, s: number) => {
+    const bx = tip.x - u.x * len * s;
+    const by = tip.y - u.y * len * s;
+    return `M ${tip.x},${tip.y} L ${bx - u.y * half},${by + u.x * half} L ${bx + u.y * half},${by - u.x * half} Z`;
+  };
+  // The line stops inside each head, so its end doesn't blunt the tip.
+  const from = atFrom ? { x: p.x + u.x * len * 0.6, y: p.y + u.y * len * 0.6 } : p;
+  const to = atTo ? { x: q.x - u.x * len * 0.6, y: q.y - u.y * len * 0.6 } : q;
+  const cls = selected ? " selected" : "";
   return (
-    <BaseEdge
-      id={id}
-      path={`M ${p.x},${p.y} L ${q.x},${q.y}`}
-      markerStart={markerStart}
-      markerEnd={markerEnd}
-      interactionWidth={24}
-      className={selected ? "link-line selected" : "link-line"}
-    />
+    <>
+      <BaseEdge id={id} path={`M ${from.x},${from.y} L ${to.x},${to.y}`} interactionWidth={24} className={"link-line" + cls} />
+      {atTo && <path className={"link-arrow" + cls} d={head(q, 1)} />}
+      {atFrom && <path className={"link-arrow" + cls} d={head(p, -1)} />}
+    </>
   );
 }
 

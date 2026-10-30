@@ -2,6 +2,7 @@
   "name": "workboard-poc",
   "version": "0.0.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Shellside PoC: wterm terminal + AI-built tool board + agent bridge (MCP / wb CLI)",
   "engines": {

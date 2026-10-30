@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, ReactFlowProvider, useReactFlow } from "@xyflow/react";
 import type { Link, LinkDirection, Tool } from "../shared/catalog.ts";
 import { useApi, ApiError, loginProblem, type AgentStatus } from "./api.ts";
-import { ClaudeMark } from "./TerminalButton.tsx";
+import { ShellsideMark } from "./ShellsideMark.tsx";
 import { AskCard } from "./Asks.tsx";
 import { BoardCanvas, useCanvasActions, type CanvasTool } from "./Canvas.tsx";
 import { ContextMenu, type MenuItem } from "./ContextMenu.tsx";
@@ -551,7 +551,7 @@ function LoginBanner({ status, onOpenTerminal, onRefresh, onNotice }: { status: 
 
   return (
     <div className="login-banner" role="alert">
-      <ClaudeMark size={22} />
+      <ShellsideMark size={22} />
       <div className="login-text">
         <b>{text.title}</b>
         <span>{text.body}</span>
