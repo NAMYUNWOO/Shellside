@@ -84,6 +84,8 @@ function ToolInspector({ tool, now, errors, onNotice, onSendToClaude, onSave, on
   const [desc, setDesc] = useState(tool.description);
   const [logs, setLogs] = useState<{ at: string; level: string; message: string }[] | null>(null);
   useEffect(() => setTitle(tool.title), [tool.title]);
+  const [name, setName] = useState(tool.name ?? "");
+  useEffect(() => setName(tool.name ?? ""), [tool.name]);
   useEffect(() => setDesc(tool.description), [tool.description]);
 
   const fail = (err: Error) => onNotice(err.message);
@@ -117,6 +119,34 @@ function ToolInspector({ tool, now, errors, onNotice, onSendToClaude, onSave, on
           onBlur={() => title.trim() && title !== tool.title && saveMeta({ title })}
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && (e.target as HTMLInputElement).blur()}
         />
+        <label className="insp-name" title={t("The name you use for it in requests to Claude, e.g. \"summarize @notes\"", "Claude에게 요청할 때 부르는 이름입니다. 예: \"@notes 요약해줘\"")}>
+          <span aria-hidden>@</span>
+          <input
+            id="insp-name"
+            aria-label={t("Name (for requests to Claude)", "이름 (Claude에게 요청할 때)")}
+            value={name}
+            spellCheck={false}
+            autoCapitalize="off"
+            autoCorrect="off"
+            onChange={(e) => setName(e.target.value.replace(/\s/g, ""))}
+            onBlur={() => {
+              const n = name.trim().replace(/^@/, "");
+              if (!n || n === tool.name) return setName(tool.name ?? "");
+              api.updateTool(tool.id, { name: n }).catch((err: Error) => {
+                setName(tool.name ?? "");
+                fail(err);
+              });
+            }}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              else if (e.key === "Escape") {
+                setName(tool.name ?? "");
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+          />
+        </label>
         <textarea
           className="insp-desc"
           aria-label={t("Description", "설명")}

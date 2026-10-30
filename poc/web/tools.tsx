@@ -1,6 +1,6 @@
 // Catalog renderers. Each draws a tool from its JSON and turns the person's edits into JSON Patches.
 // The canvas frame (Canvas.tsx) and the inspector (Inspector.tsx) wrap these.
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChecklistItem, FormField, TableColumn, Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { AppFrame } from "./AppFrame.tsx";
@@ -29,7 +29,7 @@ export function ToolBody({ tool, onNotice, onAppErrors }: { tool: Tool; onNotice
     case "table":
       return <TableTool tool={tool} patch={patch} />;
     case "note":
-      return <NoteTool tool={tool} patch={patch} />;
+      return <NoteTool tool={tool} onNotice={onNotice} />;
     case "app":
       return <AppFrame tool={tool} onNotice={onNotice} onErrors={onAppErrors} />;
     case "browser":
@@ -212,39 +212,75 @@ function Cell({ column, value, version, onCommit }: { column: TableColumn; value
 }
 
 // ── note ─────────────────────────────────────────────────────────────────────
-function NoteTool({ tool, patch }: { tool: Tool; patch: Patch }) {
+// Always editable, and what is typed is the note: it is saved a moment after typing stops (and when the note loses
+// focus), so the agent always reads what is on screen. Text from elsewhere (the agent) shows unless the person has
+// typing that is not saved yet.
+const NOTE_SAVE_MS = 400;
+function NoteTool({ tool, onNotice }: { tool: Tool; onNotice: (m: string) => void }) {
+  const api = useApi();
   const t = useT();
-  const [editing, setEditing] = useState(false);
-  const [text, setText] = useState(tool.state.text);
+  const [text, setText] = useState<string>(tool.state.text ?? "");
+  const unsaved = useRef<string | null>(null); // typed but not sent yet
+  const inflight = useRef(0); // saves on their way: their echoes may be older than what is on screen
+  const serverText = useRef<string>(tool.state.text ?? "");
+  const timer = useRef<number | undefined>(undefined);
+  const area = useRef<HTMLTextAreaElement>(null);
+  const notice = useRef(onNotice);
+  notice.current = onNotice;
+
+  const save = useCallback(() => {
+    window.clearTimeout(timer.current);
+    const value = unsaved.current;
+    if (value === null) return;
+    unsaved.current = null;
+    inflight.current++;
+    // No baseVersion: the newest text wins (this is the person typing right now).
+    api
+      .patchState(tool.id, [{ op: "replace", path: "/text", value }])
+      .catch((err: Error) => {
+        if (unsaved.current === null) unsaved.current = value; // try again with the next keystroke or blur
+        notice.current(err.message);
+      })
+      .finally(() => {
+        // Once every save has landed, show what the board has (the same text, unless someone else wrote since).
+        if (--inflight.current === 0 && unsaved.current === null) setText(serverText.current);
+      });
+  }, [api, tool.id]);
+
   useEffect(() => {
-    if (!editing) setText(tool.state.text);
-  }, [tool.version, editing]); // eslint-disable-line react-hooks/exhaustive-deps
-  if (!editing) {
-    return (
-      <div className="note-tool">
-        <pre>{tool.state.text || <span className="muted">{t("(empty)", "(비어 있음)")}</span>}</pre>
-        <button className="ghost" onClick={() => setEditing(true)}>
-          {t("Edit", "편집")}
-        </button>
-      </div>
-    );
-  }
+    serverText.current = tool.state.text ?? "";
+    if (unsaved.current === null && inflight.current === 0) setText(serverText.current);
+  }, [tool.state.text]);
+  useEffect(() => save, [save]); // leaving the board (or deleting the note) still saves the last keystrokes
+  useEffect(() => {
+    const flush = () => save();
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, [save]);
+  // The note grows with its text (the board frame follows), so it never scrolls inside.
+  useLayoutEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [text]);
+
   return (
     <div className="note-tool">
-      <textarea className="nowheel" rows={8} value={text} onChange={(e) => setText(e.target.value)} />
-      <div className="form-foot">
-        <button className="ghost" onClick={() => setEditing(false)}>
-          {t("Cancel", "취소")}
-        </button>
-        <button
-          onClick={async () => {
-            await patch([{ op: "replace", path: "/text", value: text }]);
-            setEditing(false);
-          }}
-        >
-          {t("Save", "저장")}
-        </button>
-      </div>
+      <textarea
+        ref={area}
+        value={text}
+        rows={4}
+        placeholder={t("Write a note…", "메모를 적으세요…")}
+        aria-label={t("Note", "메모")}
+        onChange={(e) => {
+          setText(e.target.value);
+          unsaved.current = e.target.value;
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(save, NOTE_SAVE_MS);
+        }}
+        onBlur={save}
+      />
     </div>
   );
 }

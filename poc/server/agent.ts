@@ -1,6 +1,7 @@
 // The agent in the terminal: is Claude logged in, is it running, and how to hand it a request.
 import { execFile } from "node:child_process";
 import type { Tool } from "../shared/catalog.ts";
+import type { Board } from "./board.ts";
 
 export interface ClaudeAuth {
   installed: boolean;
@@ -97,10 +98,30 @@ export const isClaude = (fg: string) => /(^|\/)(claude|\d+\.\d+\.\d+[\w.+-]*)$/.
 export const isShell = (fg: string) => /(^|\/)-?(bash|zsh|sh|dash)$/.test(fg);
 
 /** The request as Claude will read it: which board tools it is about, then what to do. */
-export function composeRequest(prompt: string, tools: Tool[]): string {
+/**
+ * The tools a request is about: the ones picked on the board, plus any it names ("@research"; an @word that is no
+ * tool's name is just text), and the links that touch them, readable ("@note1 → @browser1").
+ */
+export function requestTools(board: Board, prompt: string, toolIds: string[]) {
+  const ids = new Set(toolIds.map((id) => board.getTool(id).id));
+  const known = new Set(board.listTools().map((t) => t.id));
+  for (const m of prompt.matchAll(/@([\p{L}\p{N}][\p{L}\p{N}_.-]*)/gu)) {
+    // "@notes." at the end of a sentence: try the word without its trailing dots too.
+    const id = [m[1], m[1].replace(/[._-]+$/, "")].map((ref) => board.resolveToolId(ref)).find((x) => known.has(x));
+    if (id) ids.add(id);
+  }
+  return {
+    tools: [...ids].map((id) => board.getTool(id)),
+    links: board.listLinks().filter((l) => ids.has(l.from) || ids.has(l.to)).map((l) => board.describeLink(l)),
+  };
+}
+
+/** links: how these tools are linked on the board, already readable ("@note1 → @browser1"). */
+export function composeRequest(prompt: string, tools: Tool[], links: string[] = []): string {
   if (!tools.length) return prompt.trim();
-  const refs = tools.map((t) => `- "${t.title}" (${t.kind}, id: ${t.id})`).join("\n");
-  return `[WorkBoard] A request about tools selected on the board. Read them with the workboard MCP (tool_read, app_snapshot).\nTools:\n${refs}\n\nRequest: ${prompt.trim()}`;
+  const refs = tools.map((t) => `- @${t.name ?? t.id} "${t.title}" (${t.kind}, id: ${t.id})`).join("\n");
+  const linked = links.length ? `\nLinks:\n${links.map((l) => `- ${l}`).join("\n")}\n` : "";
+  return `[WorkBoard] A request about tools on the board (selected, or named with @). Read them with the workboard MCP (tool_read, app_snapshot, browser_snapshot).\nTools:\n${refs}\n${linked}\nRequest: ${prompt.trim()}`;
 }
 
 /** ANSI-C quoting ($'…') keeps newlines on one typed line in bash/zsh. */

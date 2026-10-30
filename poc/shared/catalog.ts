@@ -114,11 +114,17 @@ export interface Layout {
 export const DEFAULT_WIDTH: Record<string, number> = { checklist: 380, form: 380, note: 380, table: 600, app: 520, browser: 960 };
 /** A browser frame has a fixed height (the page scrolls inside it); other frames grow with their content. */
 export const BROWSER_HEIGHT = { default: 640, min: 260, max: 2000 };
+/** A browser frame's width: wider than other frames may be, so a page can have a full-HD layout. */
+export const BROWSER_WIDTH = { default: 960, min: 320, max: 2400 };
 /** Height of the address bar row above the page in a browser frame (px). */
 export const BROWSER_TOOLBAR = 40;
+/** The page in a browser frame is the frame less its 1 px border and the address bar. */
+export const browserFrameFor = (page: { w: number; h: number }) => ({ w: page.w + 2, h: page.h + 2 + BROWSER_TOOLBAR });
 
 export interface Tool {
   id: string;
+  /** What the person and the agent call it ("@note1"): unique on the board, works wherever a tool id does. */
+  name?: string;
   title: string;
   description: string;
   kind: ToolKind;
@@ -134,6 +140,25 @@ export interface Tool {
   compiled?: string;
   /** Frame position on the canvas. Not part of the tool's data: moving a frame never bumps its version. */
   layout?: Layout;
+}
+
+/** A tool's name: letters (any script), digits, _ . - (no spaces, so "@name" reads as one word in a request). */
+export const TOOL_NAME = /^[\p{L}\p{N}][\p{L}\p{N}_.-]{0,39}$/u;
+
+/**
+ * A line the person (or the agent) drew between two tools. none: they belong together. forward: from → to (e.g. read
+ * from, act on to). both: each way.
+ */
+export type LinkDirection = "none" | "forward" | "both";
+export const LINK_DIRECTIONS: LinkDirection[] = ["none", "forward", "both"];
+export interface Link {
+  id: string;
+  from: string;
+  to: string;
+  direction: LinkDirection;
+  createdBy: Actor;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Ask {
@@ -169,6 +194,7 @@ export function publicTool(t: Tool) {
   const { source: _s, ...props } = t.kind === "app" ? (t.props ?? {}) : {};
   return {
     id: t.id,
+    name: t.name,
     title: t.title,
     description: t.description,
     kind: t.kind,
@@ -213,6 +239,7 @@ export type BoardEventType =
   | "channel_updated"
   | "channel_deleted"
   | "browser" // the agent drove a board browser, the person took it over or handed it back, a download finished
+  | "link" // two tools were linked, a link's direction changed, or a link was removed
   | "prompt"; // the person sent a request to the agent in the terminal (it already has it)
 
 export interface BoardEvent {
@@ -222,6 +249,7 @@ export interface BoardEvent {
   type: BoardEventType;
   toolId?: string;
   askId?: string;
+  linkId?: string;
   /** English: what the agent reads (board_wait_event) and the default UI text. */
   summary: string;
   /** Korean, for the board UI in Korean. */
@@ -299,6 +327,15 @@ export const CATALOG_DOC = `# WorkBoard tool catalog
 A tool is JSON: { title, description, kind, props, state }. The board renders it; you read and write its state.
 The board is a canvas like Figma: each tool is a frame, placed automatically in free space. Pass width (px, 240–1600)
 when creating wide content (big tables, dashboards); height follows the content.
+
+## Names and links
+- Every tool has a name, unique on the board (note1, browser2, or whatever the person renamed it to, e.g. research).
+  The person points at tools by name ("@research"): wherever a toolId is asked, the name works too (with or without @).
+  Give tools you create a short name when it helps (tool_create name), or rename them with tool_update.
+- The person can draw links between tools. board_list returns them (links), tool_read lists a tool's own. A link has
+  a direction: "none" (the tools belong together), "forward" (from → to: e.g. take what is in from and act on to),
+  "both". Read linked tools together when you work on one of them, and follow the direction when the request does not
+  say otherwise. You can add links too (link_create) and change or remove the ones you made (link_update, link_delete).
 
 ## kind: "checklist"
 props: {}

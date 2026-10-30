@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { CATALOG_DOC, TOOL_KINDS, describeValue, formField, type Tool } from "../shared/catalog.ts";
+import { CATALOG_DOC, LINK_DIRECTIONS, TOOL_KINDS, describeValue, formField, type Link, type Tool } from "../shared/catalog.ts";
 import { Board, BoardError } from "./board.ts";
 import { loadSource } from "./apps.ts";
 import type { Library } from "./library.ts";
@@ -20,6 +20,10 @@ export interface McpContext {
 
 /** What the agent sees of a tool: everything but the compiled bundle. */
 const forAgent = ({ compiled, ...t }: Tool) => t;
+const toolName = z.string().min(1).max(41).describe("Short name, unique on the board: letters, digits, _ . - (no spaces), e.g. research");
+const linkDirection = z
+  .enum(LINK_DIRECTIONS as [string, ...string[]])
+  .describe('"none": the tools belong together; "forward": from → to (take from the first, act on the second); "both": each way');
 
 const patchOp = z.object({
   op: z.enum(["add", "remove", "replace", "move", "copy", "test"]),
@@ -42,7 +46,7 @@ function summarize(t: Tool) {
             : t.kind === "browser"
               ? { url: s.url, pageTitle: s.title, control: s.control, tabs: s.tabs?.length ?? 0 }
               : { chars: s.text?.length ?? 0 };
-  return { id: t.id, title: t.title, kind: t.kind, description: t.description, version: t.version, agentAccess: t.agentAccess, updatedBy: t.updatedBy, ...counts };
+  return { id: t.id, name: t.name, title: t.title, kind: t.kind, description: t.description, version: t.version, agentAccess: t.agentAccess, updatedBy: t.updatedBy, ...counts };
 }
 
 export function createBoardMcp(board: Board, ctx: McpContext) {
@@ -53,9 +57,22 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         "WorkBoard is the person's tool board next to this terminal. Tools (checklists, forms, tables, notes, apps) are JSON you can read and write. " +
         "Use it to show progress, ask for approval or structured input, and pick up what the person changed. Call board_catalog once to learn the tool shapes. " +
         "Apps share data live through channels (useChannel) and can read any tool (useTool): connect apps that way instead of merging them or relaying data yourself. " +
-        "For web pages, use the board browser (browser_open, browser_snapshot, browser_act): the person watches and can take over.",
+        "For web pages, use the board browser (browser_open, browser_snapshot, browser_act): the person watches and can take over. " +
+        "Every tool has a name the person uses to point at it (\"@research\"); a name works wherever a toolId is asked. " +
+        "The person can link tools (board_list → links): a forward link from → to means take from the first and act on the second.",
     },
   );
+
+  // Every toolId may be a name ("research" or "@research"): turn it into the id before any tool runs.
+  const register = server.registerTool.bind(server) as (...a: any[]) => unknown;
+  (server as any).registerTool = (name: string, config: unknown, cb: (args: any, extra: any) => unknown) =>
+    register(name, config, (args: any, extra: any) => cb(args && typeof args.toolId === "string" ? { ...args, toolId: board.resolveToolId(args.toolId) } : args, extra));
+
+  const named = (id: string) => {
+    const t = board.listTools().find((x) => x.id === id);
+    return { id, name: t?.name, title: t?.title };
+  };
+  const linkSummary = (l: Link) => ({ id: l.id, reads: board.describeLink(l), direction: l.direction, from: named(l.from), to: named(l.to), createdBy: l.createdBy });
 
   const reply = (data: unknown) => {
     const pending = board.undeliveredForAgent();
@@ -95,10 +112,11 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
 
   server.registerTool(
     "board_list",
-    { description: "List the tools on the board (id, title, kind, version, counts) and any approvals still waiting for the person." },
+    { description: "List the tools on the board (id, name, title, kind, version, counts), the links between them, and any approvals still waiting for the person." },
     async () =>
       run(() => ({
         tools: board.listTools().map(summarize),
+        links: board.listLinks().map(linkSummary),
         channels: board.listChannels().map(channelSummary),
         pendingAsks: board.pendingAsks().map((a) => ({ id: a.id, kind: a.kind, title: a.title, toolId: a.toolId, itemId: a.itemId })),
       })),
@@ -106,8 +124,15 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
 
   server.registerTool(
     "tool_read",
-    { description: "Read one tool in full: props (layout) and state (data), plus its version for baseVersion.", inputSchema: { toolId: z.string() } },
-    async ({ toolId }) => run(() => forAgent(board.getTool(toolId))),
+    {
+      description: "Read one tool in full: props (layout) and state (data), its version for baseVersion, and its links to other tools.",
+      inputSchema: { toolId: z.string().describe("The tool's id or name") },
+    },
+    async ({ toolId }) =>
+      run(() => {
+        const t = board.getTool(toolId);
+        return { ...forAgent(t), links: board.linksOf(t.id).map(linkSummary) };
+      }),
   );
 
   server.registerTool(
@@ -118,6 +143,7 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         "Give checklist items stable ids (e.g. step1, step2) and set gate: \"human\" on steps that need the person's approval.",
       inputSchema: {
         title: z.string().min(1).max(120),
+        name: toolName.optional(),
         description: z.string().max(500).optional().describe("One line: what the tool is for and how you will use it"),
         kind: z.enum(TOOL_KINDS as [string, ...string[]]),
         props: z.record(z.string(), z.any()).optional(),
@@ -135,6 +161,7 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
       inputSchema: {
         toolId: z.string(),
         title: z.string().max(120).optional(),
+        name: toolName.optional(),
         description: z.string().max(500).optional(),
         props: z.record(z.string(), z.any()).optional(),
         baseVersion: z.number().int().optional(),
@@ -172,6 +199,37 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
       }),
   );
 
+  // ── links: lines between tools ────────────────────────────────────────────
+  server.registerTool(
+    "link_create",
+    {
+      description:
+        "Draw a link between two tools on the board (ids or names), e.g. from a note with search terms to the browser that searches them. " +
+        "Two tools have at most one link: linking them again returns the existing one.",
+      inputSchema: { from: z.string(), to: z.string(), direction: linkDirection.optional().describe('Default "none"') },
+    },
+    async ({ from, to, direction }) => run(() => linkSummary(board.createLink("agent", { from, to, direction: direction as any }))),
+  );
+
+  server.registerTool(
+    "link_update",
+    {
+      description: "Change the direction of a link you made, or turn it around (pass from and to swapped). Links the person drew are theirs: ask them.",
+      inputSchema: { linkId: z.string(), direction: linkDirection.optional(), from: z.string().optional(), to: z.string().optional() },
+    },
+    async ({ linkId, ...rest }) => run(() => linkSummary(board.updateLink("agent", linkId, rest as any))),
+  );
+
+  server.registerTool(
+    "link_delete",
+    { description: "Remove a link you made.", inputSchema: { linkId: z.string() } },
+    async ({ linkId }) =>
+      run(() => {
+        board.deleteLink("agent", linkId);
+        return { ok: true };
+      }),
+  );
+
   // ── apps: free-form UI written as React code ─────────────────────────────
   server.registerTool(
     "app_create",
@@ -183,6 +241,7 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         "Apps that need each other's data connect through channels (useChannel) or read other tools (useTool): see board_catalog.",
       inputSchema: {
         title: z.string().min(1).max(120),
+        name: toolName.optional(),
         description: z.string().max(500).optional(),
         source: z.string().max(300_000).optional().describe("Component source; export default function App()"),
         sourcePath: z.string().max(500).optional().describe("Path to the source file, relative to the workspace"),
@@ -191,10 +250,10 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         width: z.number().int().min(240).max(1600).optional().describe("Frame width in px on the board canvas (default 520)"),
       },
     },
-    async ({ title, description, source, sourcePath, state, height, width }) =>
+    async ({ title, name, description, source, sourcePath, state, height, width }) =>
       run(() => {
         const src = loadSource(ctx.workspace, { source, sourcePath });
-        const t = board.createTool("agent", { kind: "app", title, description, props: { ...src, height }, state: state ?? {}, width });
+        const t = board.createTool("agent", { kind: "app", title, name, description, props: { ...src, height }, state: state ?? {}, width });
         return { ...forAgent(t), props: { sourcePath: t.props.sourcePath, height: t.props.height, sourceChars: t.props.source.length } };
       }),
   );
@@ -323,14 +382,15 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         url: z.string().min(1).max(8000).describe("https://…, or a domain like example.com"),
         toolId: z.string().optional().describe("Reuse this browser instead of adding a new one"),
         title: z.string().max(120).optional(),
-        width: z.number().int().min(320).max(1600).optional().describe("Frame width (default 960)"),
+        name: toolName.optional().describe("Name for a new browser (default browser1, browser2, …)"),
+        width: z.number().int().min(320).max(2400).optional().describe("Frame width (default 960). The page is the frame less 2 px wide and 42 px tall (border, address bar)"),
         height: z.number().int().min(260).max(2000).optional().describe("Frame height (default 640)"),
         snapshot: z.boolean().optional().describe("Return a page snapshot (default true)"),
       },
     },
-    async ({ url, toolId, title, width, height, snapshot }) => {
+    async ({ url, toolId, title, name, width, height, snapshot }) => {
       try {
-        const bt = await ctx.browsers.open("agent", { url, toolId, title, width, height });
+        const bt = await ctx.browsers.open("agent", { url, toolId, title, name, width, height });
         if (snapshot === false) return replyText(JSON.stringify({ toolId: bt.toolId, url: bt.tab?.url, title: bt.tab?.title }));
         const snap = await bt.snapshot("agent", { maxChars: 12000 });
         return replyText(`toolId: ${bt.toolId}`, snap.text);

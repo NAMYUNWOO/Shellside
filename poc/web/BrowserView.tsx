@@ -1,7 +1,7 @@
 // A board browser: a live view of a real Chrome tab on the server. The page is drawn from screencast frames;
 // the person's mouse, keys and typing (IME included) go back to the page. The agent drives the same tab.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Tool } from "../shared/catalog.ts";
+import { browserFrameFor, type Tool } from "../shared/catalog.ts";
 import { useApi, wsUrl } from "./api.ts";
 import { useT } from "./i18n.tsx";
 
@@ -66,6 +66,15 @@ function useOnScreen(ref: React.RefObject<HTMLElement | null>) {
 /** Input the person makes while the connection is down is kept and sent once it is back (moves are dropped). */
 const KEEP_WHILE_OFFLINE = new Set(["key", "text", "ime", "nav", "tab", "dialog", "choose", "files", "copy"]);
 
+/** Common page sizes (CSS px). The page keeps a desktop browser's identity at every size; sites lay out to the width. */
+const PAGE_SIZES = [
+  { en: "Desktop", ko: "데스크톱", w: 1280, h: 800 },
+  { en: "Laptop", ko: "노트북", w: 1440, h: 900 },
+  { en: "Full HD", ko: "풀 HD", w: 1920, h: 1080 },
+  { en: "Tablet width", ko: "태블릿 폭", w: 820, h: 1180 },
+  { en: "Phone width", ko: "휴대폰 폭", w: 390, h: 844 },
+];
+
 /** This screen's size, which the board browser reports to pages as its own. */
 const screenSize = () => ({ sw: window.screen.width, sh: window.screen.height });
 
@@ -123,6 +132,8 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
   const [fileChooser, setFileChooser] = useState<{ multiple: boolean } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [tabsOpen, setTabsOpen] = useState(false);
+  const [sizeOpen, setSizeOpen] = useState(false);
+  const [pageSize, setPageSize] = useState({ w: 0, h: 0 });
   const composing = useRef(false);
   const [caret, setCaret] = useState({ x: 0, y: 0 });
   const [promptText, setPromptText] = useState("");
@@ -245,6 +256,7 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
       const h = el.offsetHeight;
       if (!w || !h || (w === sizeRef.current.w && h === sizeRef.current.h)) return;
       sizeRef.current = { w, h };
+      setPageSize({ w, h });
       send({ t: "viewport", w, h, ...screenSize() });
     });
     ro.observe(el);
@@ -288,6 +300,7 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
     e.preventDefault();
     e.stopPropagation();
     setTabsOpen(false);
+    setSizeOpen(false);
     const p = toPage(e);
     focusKeys(p);
     send({ t: "mouse", type: "down", ...p, button: e.button, buttons: e.buttons, clickCount: e.detail || 1, mods: modsOf(e) });
@@ -393,6 +406,11 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
       onNotice((err as Error).message);
     }
   };
+  // The page is as big as its frame: a page size is a frame size.
+  const setPageSizeTo = (size: { w: number; h: number }) => {
+    setSizeOpen(false);
+    api.setLayout(tool.id, browserFrameFor(size)).catch((err: Error) => onNotice(err.message));
+  };
   const pickFiles = async (files: FileList | null) => {
     setFileChooser(null);
     if (!files?.length) return send({ t: "files", cancel: true });
@@ -453,7 +471,7 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
         />
         {(v?.tabs.length ?? 0) > 1 && (
           <div className="browser-tabs">
-            <button className="ghost" onClick={() => setTabsOpen((o) => !o)} aria-expanded={tabsOpen} title={t("Tabs", "탭")}>
+            <button className="ghost" onClick={() => (setTabsOpen((o) => !o), setSizeOpen(false))} aria-expanded={tabsOpen} title={t("Tabs", "탭")}>
               {t(`${v!.tabs.length} tabs`, `탭 ${v!.tabs.length}개`)} ▾
             </button>
             {tabsOpen && (
@@ -472,6 +490,27 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
             )}
           </div>
         )}
+        <div className="browser-tabs">
+          <button
+            className="ghost browser-size"
+            onClick={() => (setSizeOpen((o) => !o), setTabsOpen(false))}
+            aria-expanded={sizeOpen}
+            title={t("Page size: drag the frame's edges, or pick a size", "페이지 크기: 프레임 가장자리를 끌거나 크기를 고르세요")}
+          >
+            {pageSize.w && pageSize.h ? `${pageSize.w}×${pageSize.h}` : t("Size", "크기")} ▾
+          </button>
+          {sizeOpen && (
+            <div className="browser-menu" role="menu">
+              {PAGE_SIZES.map((s) => (
+                <div key={s.en} className={`browser-menu-row${s.w === pageSize.w && s.h === pageSize.h ? " on" : ""}`}>
+                  <button className="ghost" role="menuitem" onClick={() => setPageSizeTo(s)}>
+                    {t(s.en, s.ko)} <span className="browser-size-dims">{`${s.w}×${s.h}`}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         {person ? (
           <button className="primary" onClick={() => setControl("shared")} title={t("Let Claude use the browser again", "Claude가 다시 브라우저를 쓰게 합니다")}>
             {t("Hand back to Claude", "Claude에게 돌려주기")}

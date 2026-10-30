@@ -1553,18 +1553,18 @@ export class BoardBrowsers {
 
   /** The browser behind a "browser" tool. */
   get(toolId: string): BrowserTool {
-    const t = this.board.getTool(toolId);
+    const t = this.board.getTool(toolId); // an id or a name
     if (t.kind !== "browser") throw new BoardError(`"${t.title}" is a ${t.kind}, not a browser`);
-    let bt = this.tools.get(toolId);
+    let bt = this.tools.get(t.id);
     if (!bt) {
-      bt = new BrowserTool(this, toolId);
-      this.tools.set(toolId, bt);
+      bt = new BrowserTool(this, t.id);
+      this.tools.set(t.id, bt);
     }
     return bt;
   }
 
   /** Open an address: in an existing browser (toolId) or in a new browser tool on the board. */
-  async open(actor: Actor, input: { url: string; toolId?: string; title?: string; width?: number; height?: number }) {
+  async open(actor: Actor, input: { url: string; toolId?: string; title?: string; name?: string; width?: number; height?: number }) {
     const url = addressToUrl(String(input.url ?? ""));
     const problem = browserUrlProblem(url);
     if (problem) throw new BoardError(problem);
@@ -1579,7 +1579,7 @@ export class BoardBrowsers {
     try {
       host = url === "about:blank" ? "" : new URL(url).hostname.replace(/^www\./, "");
     } catch {}
-    const t = this.board.createTool(actor, { kind: "browser", title: input.title?.trim() || host || "Browser", state: { url }, width: input.width, height: input.height });
+    const t = this.board.createTool(actor, { kind: "browser", title: input.title?.trim() || host || "Browser", name: input.name, state: { url }, width: input.width, height: input.height });
     const bt = this.get(t.id);
     await bt.ensureOpen();
     await bt.settled(20000);
@@ -1592,7 +1592,7 @@ export class BoardBrowsers {
     const all = this.board.listTools().filter((t) => t.kind === "browser");
     if (all.length === 1) return this.get(all[0].id);
     if (!all.length) throw new BoardError("this board has no browser yet: open one with browser_open (url)", 404);
-    throw new BoardError(`this board has ${all.length} browsers; pass toolId (${all.map((t) => `${t.id} "${t.title}"`).join(", ")})`);
+    throw new BoardError(`this board has ${all.length} browsers; pass toolId (${all.map((t) => `@${t.name} (${t.id}, "${t.title}")`).join(", ")})`);
   }
 
   dispose() {
