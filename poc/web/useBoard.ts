@@ -132,7 +132,12 @@ function feed(live: LiveStore, m: Msg) {
 /** The agent asked (through the server) to look into or drive an app mounted in this tab. */
 async function answerRpc(ws: WebSocket, msg: { id: string; method: string; toolId: string; params: unknown }) {
   const reply = (body: object) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: "rpc_result", id: msg.id, ...body }));
-  const handler = appRegistry.get(msg.toolId);
+  // An app the agent just created, or a page that just loaded, may not have mounted its frame yet.
+  let handler = appRegistry.get(msg.toolId);
+  for (let waited = 0; !handler && waited < 8000; waited += 200) {
+    await new Promise((r) => setTimeout(r, 200));
+    handler = appRegistry.get(msg.toolId);
+  }
   if (!handler) return reply({ error: "the app is not mounted in the open board" });
   try {
     reply({ result: (await handler(msg.method, msg.params)) ?? null });

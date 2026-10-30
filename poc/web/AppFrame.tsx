@@ -55,6 +55,12 @@ ${bodyStart}${code}
 });</script></body></html>`;
 }
 
+function startSignal(key: string) {
+  let fire!: () => void;
+  const ready = new Promise<void>((r) => (fire = r));
+  return { key, ready, fire };
+}
+
 export function AppFrame({ tool, onNotice, onErrors }: { tool: Tool; onNotice: (m: string) => void; onErrors: (n: number) => void }) {
   const api = useApi();
   const live = useLive();
@@ -77,6 +83,10 @@ export function AppFrame({ tool, onNotice, onErrors }: { tool: Tool; onNotice: (
   const agentDrivenUntil = useRef(0); // writes right after an agent-invoked action are the agent's
   // What the app reads besides its own state. tools: id → version the app last got.
   const watch = useRef({ channels: new Set<string>(), tools: new Map<string, number>(), list: false, listSig: "" });
+  // Fires on the first message from this iframe's runtime: from then on it hears requests (earlier posts are lost).
+  // New code means a new iframe, which has to start again.
+  const started = useRef<ReturnType<typeof startSignal> | null>(null);
+  if (started.current?.key !== codeKey) started.current = startSignal(codeKey);
 
   const post = (msg: object) => frameRef.current?.contentWindow?.postMessage({ __wb: 1, ...msg }, "*");
   const pushServerState = () => {
@@ -129,19 +139,23 @@ export function AppFrame({ tool, onNotice, onErrors }: { tool: Tool; onNotice: (
     timer.current = window.setTimeout(flush, 250);
   };
 
-  const requestApp = (method: string, params: unknown, timeoutMs = 12000) =>
-    new Promise<unknown>((resolve, reject) => {
+  const requestApp = async (method: string, params: unknown, timeoutMs = 12000) => {
+    const until = Date.now() + timeoutMs;
+    const up = await Promise.race([started.current!.ready.then(() => true), new Promise<boolean>((r) => window.setTimeout(() => r(false), timeoutMs))]);
+    if (!up) throw new Error("the app has not started (it is still loading, or its code did not load)");
+    return new Promise<unknown>((resolve, reject) => {
       const id = ++seq.current;
       const t = window.setTimeout(() => {
         reqs.current.delete(id);
-        reject(new Error("the app did not answer (is it still loading or stuck?)"));
-      }, timeoutMs);
+        reject(new Error("the app did not answer (is it stuck?)"));
+      }, Math.max(until - Date.now(), 1000));
       reqs.current.set(id, {
         resolve: (v) => (clearTimeout(t), resolve(v)),
         reject: (e) => (clearTimeout(t), reject(e)),
       });
       post({ id, method, params });
     });
+  };
 
   // Channels and tools this app watches changed (another app, the agent, another tab): pass the new value in.
   useEffect(
@@ -200,6 +214,7 @@ export function AppFrame({ tool, onNotice, onErrors }: { tool: Tool; onNotice: (
       if (e.source !== frameRef.current?.contentWindow) return;
       const m = e.data;
       if (!m || m.__wb !== 1) return;
+      started.current?.fire();
       if (m.re !== undefined) {
         const r = reqs.current.get(m.re);
         reqs.current.delete(m.re);

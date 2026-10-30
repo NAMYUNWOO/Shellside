@@ -46,7 +46,8 @@ export class BoardRuntime {
   readonly shell: ShellSession;
   readonly browsers: BoardBrowsers;
   readonly clients = new Set<WebSocket>();
-  private rpcPending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  /** waiting = tabs that have not answered yet; error = the first tab's error, used once every tab failed. */
+  private rpcPending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout; waiting: number; error?: string }>();
   private hook: { state: AgentState; at: string } = { state: "starting", at: new Date().toISOString() };
   /** Set when Claude in this terminal asks to sign in; cleared on "Login successful" or once Claude works. */
   login: { needed: boolean; hint?: string; at?: string } = { needed: false };
@@ -120,31 +121,50 @@ export class BoardRuntime {
     this.hook = { state: "starting", at: new Date().toISOString() };
   }
 
+  /** If no tab shows the board (the person is reloading the page, or the socket is reconnecting), wait this long for one. */
+  static readonly TAB_WAIT_MS = 10_000;
+
+  private openClients() {
+    return [...this.clients].filter((ws) => ws.readyState === ws.OPEN);
+  }
+
   /** Ask a browser tab showing this board to run something inside an app iframe. */
-  browserRpc(method: string, toolId: string, params: unknown, timeoutMs = 15000): Promise<unknown> {
-    const clients = [...this.clients].filter((ws) => ws.readyState === ws.OPEN);
+  async browserRpc(method: string, toolId: string, params: unknown, timeoutMs = 20000): Promise<unknown> {
+    let clients = this.openClients();
+    for (const until = Date.now() + BoardRuntime.TAB_WAIT_MS; !clients.length && Date.now() < until; ) {
+      await new Promise((r) => setTimeout(r, 250));
+      clients = this.openClients();
+    }
     if (!clients.length) {
-      return Promise.reject(
-        new BoardError(`board "${this.meta.name}" is not open in a browser, so its apps are not running. Ask the person to open this board in WorkBoard.`, 409),
+      throw new BoardError(
+        `no browser tab has board "${this.meta.name}" open (waited ${BoardRuntime.TAB_WAIT_MS / 1000}s), so its apps are not running. ` +
+          `Ask the person to open this board, then try again.`,
+        409,
       );
     }
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        // A tab that closed mid-call never answers; if another tab already failed, its reason is the better error.
+        const error = this.rpcPending.get(id)?.error;
         this.rpcPending.delete(id);
-        reject(new BoardError(`the app did not answer within ${Math.round(timeoutMs / 1000)}s`, 504));
+        reject(error ? new BoardError(error, 422) : new BoardError(`the app did not answer within ${Math.round(timeoutMs / 1000)}s`, 504));
       }, timeoutMs);
-      this.rpcPending.set(id, { resolve, reject, timer });
+      this.rpcPending.set(id, { resolve, reject, timer, waiting: clients.length });
       for (const ws of clients) ws.send(JSON.stringify({ type: "rpc", id, method, toolId, params }));
     });
   }
 
   rpcResult(msg: { id: string; result?: unknown; error?: string }) {
     const p = this.rpcPending.get(msg.id);
-    if (!p) return; // another tab answered first
+    if (!p) return; // already settled: another tab answered first
+    if (msg.error) {
+      p.error ??= String(msg.error);
+      if (--p.waiting > 0) return; // another tab may still have the app running
+    }
     this.rpcPending.delete(msg.id);
     clearTimeout(p.timer);
-    if (msg.error) p.reject(new BoardError(String(msg.error), 422));
+    if (msg.error) p.reject(new BoardError(p.error!, 422));
     else p.resolve(msg.result);
   }
 
