@@ -63,6 +63,8 @@ export class Chrome {
   /** Called when Chrome goes away (crash or kill), so tabs can forget their sessions. */
   onExit: (() => void) | null = null;
   userAgent = "";
+  /** CDP's UserAgentMetadata for this browser, to send with the user agent (null if it could not be read). */
+  userAgentMetadata: object | null = null;
 
   constructor(private profileDir: string) {}
 
@@ -98,6 +100,9 @@ export class Chrome {
       "--disable-backgrounding-occluded-windows",
       "--disable-renderer-backgrounding",
       "--disable-features=Translate,MediaRouter,DialMediaRouteProvider",
+      // The debugging pipe and headless mode set navigator.webdriver, and sites then treat every visit as a bot's
+      // (Google answers the first search with a captcha). A person drives this browser most of the time.
+      "--disable-blink-features=AutomationControlled",
       // macOS: no Keychain prompt for this separate profile (Playwright and Puppeteer do the same).
       ...(platform() === "darwin" ? ["--use-mock-keychain"] : []),
       "--mute-audio",
@@ -137,6 +142,7 @@ export class Chrome {
     try {
       const v = await withTimeout(this.send("Browser.getVersion"), 15000, "Chrome did not start within 15s");
       this.userAgent = String(v.userAgent ?? "").replace("HeadlessChrome", "Chrome");
+      this.userAgentMetadata = await this.readUserAgentMetadata().catch(() => null);
       await this.send("Target.setDiscoverTargets", { discover: true });
       return true;
     } catch (err) {
@@ -144,6 +150,27 @@ export class Chrome {
       this.kill();
       const hint = stderr.trim().split("\n").slice(-3).join(" ");
       return { quit, message: `${(err as Error).message}${hint ? ` — ${hint}` : ""}` };
+    }
+  }
+
+  /**
+   * The browser's own brand, version and platform (navigator.userAgentData, the Sec-CH-UA headers), read once from a
+   * throwaway tab. Overriding the user agent without them clears them, and a Chrome that sends none looks like a bot.
+   */
+  private async readUserAgentMetadata(): Promise<object | null> {
+    // userAgentData exists only on secure pages, and about:blank is not one.
+    const { targetId } = await this.send("Target.createTarget", { url: "chrome://version" });
+    try {
+      const { sessionId } = await this.send("Target.attachToTarget", { targetId, flatten: true });
+      for (let i = 0; i < 30; i++) {
+        const r = await this.send("Runtime.evaluate", { expression: UA_METADATA_JS, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null);
+        const m = r?.result?.value;
+        if (m && Array.isArray(m.brands) && m.brands.length) return m;
+        await sleep(100); // still on the blank page it starts with
+      }
+      return null;
+    } finally {
+      await this.send("Target.closeTarget", { targetId }).catch(() => {});
     }
   }
 
@@ -224,6 +251,15 @@ export class Chrome {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** navigator.userAgentData in the shape of CDP's Emulation.UserAgentMetadata. */
+const UA_METADATA_JS = `(async () => {
+  const d = navigator.userAgentData;
+  if (!d) return null;
+  const v = await d.getHighEntropyValues(["architecture", "bitness", "fullVersionList", "model", "platformVersion", "uaFullVersion", "wow64", "formFactors"]);
+  return { brands: v.brands, fullVersionList: v.fullVersionList, fullVersion: v.uaFullVersion, platform: v.platform, platformVersion: v.platformVersion,
+    architecture: v.architecture, model: v.model, mobile: v.mobile, bitness: v.bitness, wow64: v.wow64, formFactors: v.formFactors };
+})()`;
 
 const FRAME_EVENT = '"method":"Page.screencastFrame"';
 const DATA_KEY = Buffer.from('"data":"');

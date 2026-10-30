@@ -66,6 +66,9 @@ function useOnScreen(ref: React.RefObject<HTMLElement | null>) {
 /** Input the person makes while the connection is down is kept and sent once it is back (moves are dropped). */
 const KEEP_WHILE_OFFLINE = new Set(["key", "text", "ime", "nav", "tab", "dialog", "choose", "files", "copy"]);
 
+/** This screen's size, which the board browser reports to pages as its own. */
+const screenSize = () => ({ sw: window.screen.width, sh: window.screen.height });
+
 // ── the wheel over a page ──
 // A scroll that starts over a page scrolls the page, and the rest of that gesture (momentum included) stays with it even
 // if the pointer slides off. A scroll that starts on the board stays with the board when it passes over a page. A pinch
@@ -185,7 +188,7 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
         retry = 0;
         setConnected(true);
         const { w, h } = sizeRef.current;
-        if (w && h) ws.send(JSON.stringify({ t: "viewport", w, h }));
+        if (w && h) ws.send(JSON.stringify({ t: "viewport", w, h, ...screenSize() }));
         if (!onScreenRef.current) ws.send(JSON.stringify({ t: "pause" }));
         for (const m of outbox.current.splice(0)) ws.send(JSON.stringify(m));
       };
@@ -242,7 +245,7 @@ export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: stri
       const h = el.offsetHeight;
       if (!w || !h || (w === sizeRef.current.w && h === sizeRef.current.h)) return;
       sizeRef.current = { w, h };
-      send({ t: "viewport", w, h });
+      send({ t: "viewport", w, h, ...screenSize() });
     });
     ro.observe(el);
     return () => ro.disconnect();

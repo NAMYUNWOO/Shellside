@@ -99,7 +99,10 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
   or Playwright's Chromium; set `WB_CHROME` to choose). It is driven over the DevTools protocol through a **pipe**, not a
   port, so no other program or website can connect to it. Its profile (cookies, sign-ins) is separate from your own
   Chrome and lives in `data/browser/profile`. Tabs nobody has used for 10 minutes close (the address is kept), and
-  Chrome quits when no tab is left.
+  Chrome quits when no tab is left. To websites it presents itself as the browser it is (brand, version and platform
+  in the user agent and `Sec-CH-UA` headers, a clean language list, your screen's size, and no `navigator.webdriver`
+  flag). Sites still decide on their own: a fresh profile without cookies gets more CAPTCHAs, and signing in to
+  Google in the board browser usually calms them.
 - **You.** The frame shows the page live (screencast frames over `/ws/browser`, rendered at 2× so text stays sharp on
   high-density screens). A view acknowledges each frame it draws and gets the next only then, so a slow screen skips
   frames instead of falling behind. Clicks, scrolling, keys, paste and IME input (Korean, Japanese…) go to the page; IME
