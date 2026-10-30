@@ -7,7 +7,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { BoardError } from "./board.ts";
 import { handleMcp } from "./mcp.ts";
 import { compileApp, ensureRuntime, loadSource, RUNTIME_OUT } from "./apps.ts";
-import { claudeAuth, composeRequest, isClaude, isShell, shellQuote } from "./agent.ts";
+import { claudeAuth, composeRequest, isClaude, isShell, requestTools, shellQuote } from "./agent.ts";
 import { Library } from "./library.ts";
 import { BoardRegistry, type BoardRuntime } from "./boards.ts";
 import { BrowserService } from "./browser.ts";
@@ -104,9 +104,9 @@ const humanOnly = (actor: Actor, what: string) => {
 /** Hand a request to the board's agent: into Claude's prompt if it runs, else start Claude with it. */
 function sendToAgent(rt: BoardRuntime, prompt: string, toolIds: string[], lang: Lang) {
   if (!prompt?.trim()) throw new BoardError(L(lang, "Write what you want Claude to do.", "Claude에게 보낼 내용을 적어 주세요."));
-  const tools = toolIds.map((id) => rt.board.getTool(id));
+  const { tools, links } = requestTools(rt.board, prompt, toolIds);
   if (!rt.shell.running) throw new BoardError(L(lang, "This board's terminal hasn't started yet. Open the terminal once.", "이 보드의 터미널이 아직 시작되지 않았습니다. 터미널을 한 번 열어 주세요."), 409);
-  const text = composeRequest(prompt, tools);
+  const text = composeRequest(prompt, tools, links);
   const fg = rt.shell.foreground();
   let mode: "claude" | "started";
   const state = rt.agentState();
@@ -247,6 +247,16 @@ const boardRoutes: BoardRoute[] = [
   ["PATCH", /^\/tools\/([\w-]+)$/, ({ rt, params, body, actor }) => rt.board.updateTool(actor, params[0], body ?? {})],
   ["PATCH", /^\/tools\/([\w-]+)\/layout$/, ({ rt, params, body }) => rt.board.setLayout(params[0], body ?? {})],
   ["POST", /^\/tools\/([\w-]+)\/patch$/, ({ rt, params, body, actor }) => rt.board.patchState(actor, params[0], body?.patch, body?.baseVersion)],
+  ["POST", /^\/links$/, ({ rt, body, actor }) => rt.board.createLink(actor, body ?? {})],
+  ["PATCH", /^\/links\/([\w-]+)$/, ({ rt, params, body, actor }) => rt.board.updateLink(actor, params[0], body ?? {})],
+  [
+    "DELETE",
+    /^\/links\/([\w-]+)$/,
+    ({ rt, params, actor }) => {
+      rt.board.deleteLink(actor, params[0]);
+      return { ok: true };
+    },
+  ],
   [
     "DELETE",
     /^\/tools\/([\w-]+)$/,
@@ -633,10 +643,12 @@ server.listen(PORT, HOST, () => {
   console.log(PROD ? `[workboard] open    ${SERVER_URL}` : `[workboard] open    http://127.0.0.1:5173  (vite)`);
 });
 
+let stopping = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
+    if (stopping) process.exit(0); // asked twice: do not wait
+    stopping = true;
     boards.disposeAll();
-    browsers.dispose();
-    process.exit(0);
+    void browsers.dispose().finally(() => process.exit(0));
   });
 }

@@ -3,15 +3,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
+  BaseEdge,
+  ConnectionLineType,
+  ConnectionMode,
   Controls,
+  Handle,
+  MarkerType,
   MiniMap,
   NodeResizeControl,
+  Position,
   ReactFlow,
   ResizeControlVariant,
   SelectionMode,
+  applyEdgeChanges,
   applyNodeChanges,
+  useInternalNode,
   useReactFlow,
   useStore,
+  type ControlPosition,
+  type Edge,
+  type EdgeChange,
+  type EdgeProps,
+  type InternalNode,
   type Node,
   type NodeChange,
   type NodeProps,
@@ -19,7 +32,7 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { BROWSER_HEIGHT, type Layout, type Tool } from "../shared/catalog.ts";
+import { BROWSER_HEIGHT, BROWSER_WIDTH, type Layout, type Link, type LinkDirection, type Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { ToolBody } from "./tools.tsx";
 import { kindLabel, useT } from "./i18n.tsx";
@@ -33,8 +46,14 @@ interface FrameData extends Record<string, unknown> {
   onAppErrors: (toolId: string, n: number) => void;
   onLayout: (toolId: string, l: Partial<Layout>) => void;
   onNotice: (m: string) => void;
+  /** The link tool is on: the whole frame is where a link starts or ends. */
+  linking: boolean;
 }
 type FrameNode = Node<FrameData, "frame">;
+type LinkEdge = Edge<{ direction: LinkDirection }, "link">;
+
+/** select: drag on empty space draws a selection box. hand: drag anywhere pans. link: drag from a frame to another. */
+export type CanvasTool = "select" | "hand" | "link";
 
 const viewportKey = (boardId: string) => `wb.viewport.${boardId}`;
 function savedViewport(boardId: string): Viewport | undefined {
@@ -56,8 +75,12 @@ interface BoardCanvasProps {
   onContextMenu: (e: { x: number; y: number }, ids: string[], at: { x: number; y: number }) => void;
   onDropTemplate: (templateId: string, at: { x: number; y: number }) => void;
   showMinimap: boolean;
-  /** select: drag on empty space draws a selection box. hand: drag anywhere pans; frames ignore the pointer. */
-  tool: "select" | "hand";
+  /** select: drag on empty space draws a selection box. hand: drag anywhere pans; frames ignore the pointer. link: drag from one frame to another. */
+  tool: CanvasTool;
+  links: Link[];
+  onSelectLinks: (ids: string[]) => void;
+  /** Right click on a link. */
+  onLinkMenu: (e: { x: number; y: number }, linkId: string) => void;
   activeIds: Set<string>;
   waitingIds: Set<string>;
   appErrors: Record<string, number>;
@@ -68,11 +91,13 @@ interface BoardCanvasProps {
 }
 
 const nodeTypes = { frame: FrameView };
+const edgeTypes = { link: LinkLine };
 
 export function BoardCanvas(props: BoardCanvasProps) {
   const api = useApi();
   const t = useT();
   const { boardId, tools, selectedIds, onSelect, activeIds, waitingIds, appErrors, onAppErrors, onInteract, onNotice } = props;
+  const linking = props.tool === "link";
   const rf = useReactFlow<FrameNode>();
   const [nodes, setNodes] = useState<FrameNode[]>([]);
   const initialViewport = useRef(savedViewport(boardId));
@@ -118,11 +143,35 @@ export function BoardCanvas(props: BoardCanvasProps) {
             height: p?.resizing ? p.height : t.kind === "browser" ? (L.h ?? BROWSER_HEIGHT.default) : undefined,
             dragHandle: ".frame-label",
             selected: selectedSet.current.has(t.id),
-            data: { tool: t, active: activeIds.has(t.id), waiting: waitingIds.has(t.id), errors: appErrors[t.id] ?? 0, onAppErrors, onLayout, onNotice },
+            data: { tool: t, active: activeIds.has(t.id), waiting: waitingIds.has(t.id), errors: appErrors[t.id] ?? 0, onAppErrors, onLayout, onNotice, linking },
           } as FrameNode;
         });
     });
-  }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice]);
+  }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice, linking]);
+
+  // Board links → React Flow edges. Selection stays React Flow's; the arrowheads (direction) follow each link's colour.
+  const [edges, setEdges] = useState<LinkEdge[]>([]);
+  useEffect(() => {
+    setEdges((prev) => {
+      const was = new Map(prev.map((e) => [e.id, e.selected]));
+      return props.links
+        .filter((l) => tools.some((t) => t.id === l.from) && tools.some((t) => t.id === l.to))
+        .map((l) => ({ id: l.id, source: l.from, target: l.to, type: "link", selected: !!was.get(l.id), data: { direction: l.direction } }) as LinkEdge);
+    });
+  }, [props.links, tools]);
+  const shownEdges = useMemo(
+    () =>
+      edges.map((e) => {
+        const d = e.data?.direction ?? "none";
+        const arrow = { type: MarkerType.ArrowClosed, width: 16, height: 16, color: e.selected ? "var(--accent)" : "var(--link)" };
+        return { ...e, markerEnd: d !== "none" ? arrow : undefined, markerStart: d === "both" ? arrow : undefined };
+      }),
+    [edges],
+  );
+  const onEdgesChange = useCallback((changes: EdgeChange<LinkEdge>[]) => {
+    // Links are removed from their menu or with Delete (BoardPanel), never by React Flow itself.
+    setEdges((eds) => applyEdgeChanges(changes.filter((c) => c.type === "select"), eds));
+  }, []);
 
   const onNodesChange = useCallback((changes: NodeChange<FrameNode>[]) => {
     // Frames are deleted from the inspector (with a confirm), never by a stray key press.
@@ -130,7 +179,8 @@ export function BoardCanvas(props: BoardCanvasProps) {
   }, []);
 
   // The wheel zooms (React Flow, everywhere incl. over frames). Shift+wheel pans instead.
-  // Scrollable parts inside a frame are marked .nowheel and keep their own scrolling.
+  // Scrollable parts inside a frame are marked .nowheel and keep their own scrolling. A browser page takes a scroll
+  // that starts over it before this runs (see routeWheel in BrowserView).
   const wrapRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = wrapRef.current;
@@ -152,16 +202,39 @@ export function BoardCanvas(props: BoardCanvasProps) {
     return () => el.removeEventListener("wheel", onWheel, { capture: true });
   }, [rf, onInteract]);
 
-  const onSelectionChange = useCallback(({ nodes: sel }: OnSelectionChangeParams) => onSelect(sel.map((n) => n.id)), [onSelect]);
+  const { onSelectLinks } = props;
+  const onSelectionChange = useCallback(
+    ({ nodes: sel, edges: selEdges }: OnSelectionChangeParams) => {
+      onSelect(sel.map((n) => n.id));
+      onSelectLinks(selEdges.map((e) => e.id));
+    },
+    [onSelect, onSelectLinks],
+  );
   const flowPos = (e: { clientX: number; clientY: number }) => rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
 
   return (
     <div ref={wrapRef} className="flow-wrap">
-    <ReactFlow<FrameNode>
+    <ReactFlow<FrameNode, LinkEdge>
       nodes={nodes}
-      edges={[]}
+      edges={shownEdges}
       nodeTypes={nodeTypes}
+      edgeTypes={edgeTypes}
       onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
+      // Links: in link mode, press on a frame and let go on another (or click one, then the other).
+      connectionMode={ConnectionMode.Loose}
+      connectionLineType={ConnectionLineType.Straight}
+      connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2 }}
+      isValidConnection={(c) => c.source !== c.target}
+      onConnect={(c) => {
+        if (!c.source || !c.target || c.source === c.target) return;
+        api.createLink(c.source, c.target).catch((err: Error) => onNotice(err.message));
+      }}
+      onEdgeContextMenu={(e, edge) => {
+        e.preventDefault();
+        setEdges((eds) => eds.map((x) => ({ ...x, selected: x.id === edge.id })));
+        props.onLinkMenu({ x: e.clientX, y: e.clientY }, edge.id);
+      }}
       onNodeDragStart={onInteract}
       onNodeDragStop={(_e, _node, dragged) => dragged.forEach((n) => onLayout(n.id, { x: n.position.x, y: n.position.y }))}
       onSelectionChange={onSelectionChange}
@@ -209,16 +282,16 @@ export function BoardCanvas(props: BoardCanvasProps) {
       // Space+drag, middle-button drag, the hand tool or Shift+wheel pan; ⌘/Ctrl/Shift+click adds to the selection.
       selectionOnDrag={props.tool === "select"}
       selectionMode={SelectionMode.Partial}
-      panOnDrag={props.tool === "hand" ? true : [1]}
+      panOnDrag={props.tool === "select" ? [1] : true}
       nodesDraggable={props.tool === "select"}
-      elementsSelectable={props.tool === "select"}
+      elementsSelectable={props.tool !== "hand"}
       panActivationKeyCode="Space"
       multiSelectionKeyCode={["Meta", "Control", "Shift"]}
       zoomOnScroll
       zoomOnPinch
       zoomOnDoubleClick={false}
       deleteKeyCode={null}
-      nodesConnectable={false}
+      nodesConnectable={linking}
       colorMode="system"
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1.3} />
@@ -244,57 +317,100 @@ export function BoardCanvas(props: BoardCanvasProps) {
   );
 }
 
+// ── links ──
+/** Where the line from a frame's centre towards a point leaves the frame. */
+function borderPoint(n: InternalNode, toward: { x: number; y: number }, gap: number) {
+  const w = n.measured.width ?? 0;
+  const h = n.measured.height ?? 0;
+  const cx = n.internals.positionAbsolute.x + w / 2;
+  const cy = n.internals.positionAbsolute.y + h / 2;
+  const dx = toward.x - cx;
+  const dy = toward.y - cy;
+  if (!dx && !dy) return { x: cx, y: cy };
+  const s = Math.min(dx ? (w / 2 + gap) / Math.abs(dx) : Infinity, dy ? (h / 2 + gap) / Math.abs(dy) : Infinity);
+  return { x: cx + dx * s, y: cy + dy * s };
+}
+const centre = (n: InternalNode) => ({ x: n.internals.positionAbsolute.x + (n.measured.width ?? 0) / 2, y: n.internals.positionAbsolute.y + (n.measured.height ?? 0) / 2 });
+
+/** A straight line between two frames' edges, aimed centre to centre (it follows the frames as they move). */
+function LinkLine({ id, source, target, markerStart, markerEnd, selected }: EdgeProps<LinkEdge>) {
+  const a = useInternalNode(source);
+  const b = useInternalNode(target);
+  if (!a || !b) return null;
+  const p = borderPoint(a, centre(b), 6);
+  const q = borderPoint(b, centre(a), 6);
+  return (
+    <BaseEdge
+      id={id}
+      path={`M ${p.x},${p.y} L ${q.x},${q.y}`}
+      markerStart={markerStart}
+      markerEnd={markerEnd}
+      interactionWidth={24}
+      className={selected ? "link-line selected" : "link-line"}
+    />
+  );
+}
+
+// The top edge stays free for the frame's label (dragging it moves the frame).
+const BROWSER_GRIPS: [ControlPosition, ResizeControlVariant][] = [
+  ["left", ResizeControlVariant.Line],
+  ["right", ResizeControlVariant.Line],
+  ["bottom", ResizeControlVariant.Line],
+  ["bottom-left", ResizeControlVariant.Handle],
+  ["bottom-right", ResizeControlVariant.Handle],
+];
+
 function FrameView({ data, selected }: NodeProps<FrameNode>) {
   const t = useT();
   const zoom = useStore((s) => s.transform[2]);
   const { tool, active, waiting, errors } = data;
   const browser = tool.kind === "browser";
-  const cls = ["frame", browser && "browser-frame", selected && "selected", active && "active", waiting && "waiting"].filter(Boolean).join(" ");
+  const cls = ["frame", browser && "browser-frame", selected && "selected", active && "active", waiting && "waiting", data.linking && "linking"].filter(Boolean).join(" ");
   return (
     <div className={cls} style={{ ["--z" as string]: zoom }}>
+      {/* Where links attach. With the link tool it covers the frame, so a link starts or ends anywhere on it. */}
+      <Handle type="source" position={Position.Top} className="link-handle" isConnectable={data.linking} />
       <div className="frame-label" style={{ transform: `scale(${1 / zoom})` }} title={tool.description || tool.title}>
         <span className="frame-title">{tool.title}</span>
+        {tool.name && <span className="frame-name">@{tool.name}</span>}
         <span className="frame-kind">{kindLabel(tool.kind, t)}</span>
         {active && <span className="pill agent">{t("agent working", "agent 작업 중")}</span>}
         {waiting && <span className="pill wait">{t("awaiting reply", "응답 대기")}</span>}
         {errors > 0 && <span className="pill error">{t(`${errors} error${errors > 1 ? "s" : ""}`, `오류 ${errors}`)}</span>}
       </div>
       <div className="frame-body">
-        <ToolBody tool={tool} selected={!!selected} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
+        <ToolBody tool={tool} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
         {tool.kind === "app" && !selected && (
           // First click selects the app; only then does its iframe get the pointer, so scroll/drag keep panning the canvas.
-          // (A browser needs no shield: its first click already reaches the page, and its wheel zooms the board until selected.)
+          // (A browser needs no shield: clicks reach the page at once, and a scroll that starts on the board keeps zooming it.)
           <div className="frame-shield" title={t("Click to use the app", "클릭해서 앱 사용")} />
         )}
       </div>
-      {selected && (
+      {selected && !browser && (
         <NodeResizeControl
           variant={ResizeControlVariant.Line}
           position="right"
-          minWidth={browser ? 320 : 240}
+          minWidth={240}
           maxWidth={1600}
           onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, w: p.width })}
         />
       )}
-      {selected && browser && (
-        <>
+      {/* A browser frame resizes from its sides and bottom corners, selected or not (selecting it by clicking the page
+          would also click the website). The page takes the frame's new size. */}
+      {browser &&
+        BROWSER_GRIPS.map(([position, variant]) => (
           <NodeResizeControl
-            variant={ResizeControlVariant.Line}
-            position="bottom"
-            minHeight={BROWSER_HEIGHT.min}
-            maxHeight={BROWSER_HEIGHT.max}
-            onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, h: p.height })}
-          />
-          <NodeResizeControl
-            position="bottom-right"
-            minWidth={320}
-            maxWidth={1600}
+            key={position}
+            position={position}
+            variant={variant}
+            autoScale={false} // the CSS keeps grips the same size on screen at any zoom
+            minWidth={BROWSER_WIDTH.min}
+            maxWidth={BROWSER_WIDTH.max}
             minHeight={BROWSER_HEIGHT.min}
             maxHeight={BROWSER_HEIGHT.max}
             onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, w: p.width, h: p.height })}
           />
-        </>
-      )}
+        ))}
     </div>
   );
 }

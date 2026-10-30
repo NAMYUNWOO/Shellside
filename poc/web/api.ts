@@ -2,7 +2,7 @@
 // Board-scoped calls are bound to one board (makeApi / useApi), so boards running in the background never
 // send to the board on screen.
 import { createContext, createElement, useContext, useMemo, type ReactNode } from "react";
-import type { Ask, Channel, Tool } from "../shared/catalog.ts";
+import type { Ask, Channel, Link, LinkDirection, Tool } from "../shared/catalog.ts";
 import { currentLang } from "./i18n.tsx";
 
 export class ApiError extends Error {
@@ -101,6 +101,10 @@ export function makeApi(boardId: string) {
     updateTool: (toolId: string, input: Partial<Tool> & { baseVersion?: number }) => call<Tool>("PATCH", b(`/tools/${toolId}`), input),
     setLayout: (toolId: string, layout: Partial<{ x: number; y: number; w: number; h: number }>) => call<Tool>("PATCH", b(`/tools/${toolId}/layout`), layout),
     deleteTool: (toolId: string) => call<{ ok: true }>("DELETE", b(`/tools/${toolId}`)),
+    // links between tools
+    createLink: (from: string, to: string, direction: LinkDirection = "none") => call<Link>("POST", b("/links"), { from, to, direction }),
+    updateLink: (linkId: string, input: { direction?: LinkDirection; from?: string; to?: string }) => call<Link>("PATCH", b(`/links/${linkId}`), input),
+    deleteLink: (linkId: string) => call<{ ok: true }>("DELETE", b(`/links/${linkId}`)),
     answerAsk: (askId: string, answer: { approved?: boolean; values?: Record<string, unknown>; comment?: string }) => call<Ask>("POST", b(`/asks/${askId}/answer`), answer),
     sendMessage: (text: string, toolId?: string) => call("POST", b("/messages"), { text, toolId }),
     stop: (reason?: string) => call("POST", b("/stop"), { reason }),

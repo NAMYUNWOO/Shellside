@@ -1,6 +1,6 @@
 // Live board state over /ws/board, with reconnect.
 import { useEffect, useMemo, useReducer, useState } from "react";
-import type { Ask, BoardEvent, Channel, Tool } from "../shared/catalog.ts";
+import type { Ask, BoardEvent, Channel, Link, Tool } from "../shared/catalog.ts";
 import { makeApi, wsUrl, type Template } from "./api.ts";
 import { appRegistry } from "./AppFrame.tsx";
 import { LiveStore } from "./live.ts";
@@ -11,16 +11,19 @@ interface State {
   events: BoardEvent[];
   library: Template[];
   channels: Record<string, Channel>;
+  links: Record<string, Link>;
 }
 
 type Msg =
-  | { type: "snapshot"; tools: Tool[]; asks: Ask[]; events: BoardEvent[]; library?: Template[]; channels?: Channel[] }
+  | { type: "snapshot"; tools: Tool[]; asks: Ask[]; events: BoardEvent[]; library?: Template[]; channels?: Channel[]; links?: Link[] }
   | { type: "library"; items: Template[] }
   | { type: "tool"; tool: Tool }
   | { type: "tool_deleted"; toolId: string }
   | { type: "ask"; ask: Ask }
   | { type: "channel"; channel: Channel }
   | { type: "channel_deleted"; name: string }
+  | { type: "link"; link: Link }
+  | { type: "link_deleted"; linkId: string }
   | { type: "event"; event: BoardEvent };
 
 function reduce(s: State, m: Msg): State {
@@ -32,7 +35,14 @@ function reduce(s: State, m: Msg): State {
         events: m.events,
         library: m.library ?? [],
         channels: Object.fromEntries((m.channels ?? []).map((c) => [c.name, c])),
+        links: Object.fromEntries((m.links ?? []).map((l) => [l.id, l])),
       };
+    case "link":
+      return { ...s, links: { ...s.links, [m.link.id]: m.link } };
+    case "link_deleted": {
+      const { [m.linkId]: _, ...rest } = s.links;
+      return { ...s, links: rest };
+    }
     case "channel":
       return { ...s, channels: { ...s.channels, [m.channel.name]: m.channel } };
     case "channel_deleted": {
@@ -59,7 +69,7 @@ function reduce(s: State, m: Msg): State {
 }
 
 export function useBoard(boardId: string) {
-  const [state, dispatch] = useReducer(reduce, { tools: {}, asks: {}, events: [], library: [], channels: {} });
+  const [state, dispatch] = useReducer(reduce, { tools: {}, asks: {}, events: [], library: [], channels: {}, links: {} });
   // Channels and tool states for the app frames, updated before React renders (see live.ts).
   const live = useMemo(() => new LiveStore(makeApi(boardId)), [boardId]);
   const [connected, setConnected] = useState(false);
@@ -100,7 +110,8 @@ export function useBoard(boardId: string) {
   const tools = Object.values(state.tools).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const asks = Object.values(state.asks).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const channels = Object.values(state.channels).sort((a, b) => a.name.localeCompare(b.name));
-  return { tools, toolsById: state.tools, asks, events: state.events, library: state.library, channels, live, connected, ready };
+  const links = useMemo(() => Object.values(state.links), [state.links]);
+  return { tools, toolsById: state.tools, asks, events: state.events, library: state.library, channels, links, live, connected, ready };
 }
 
 function feed(live: LiveStore, m: Msg) {

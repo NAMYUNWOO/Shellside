@@ -1,7 +1,7 @@
 // A board browser: a live view of a real Chrome tab on the server. The page is drawn from screencast frames;
 // the person's mouse, keys and typing (IME included) go back to the page. The agent drives the same tab.
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Tool } from "../shared/catalog.ts";
+import { browserFrameFor, type Tool } from "../shared/catalog.ts";
 import { useApi, wsUrl } from "./api.ts";
 import { useT } from "./i18n.tsx";
 
@@ -66,8 +66,47 @@ function useOnScreen(ref: React.RefObject<HTMLElement | null>) {
 /** Input the person makes while the connection is down is kept and sent once it is back (moves are dropped). */
 const KEEP_WHILE_OFFLINE = new Set(["key", "text", "ime", "nav", "tab", "dialog", "choose", "files", "copy"]);
 
-/** selected: the frame is selected on the canvas. Until then the wheel zooms the board instead of scrolling the page. */
-export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected: boolean; onNotice: (m: string) => void }) {
+/** Common page sizes (CSS px). The page keeps a desktop browser's identity at every size; sites lay out to the width. */
+const PAGE_SIZES = [
+  { en: "Desktop", ko: "데스크톱", w: 1280, h: 800 },
+  { en: "Laptop", ko: "노트북", w: 1440, h: 900 },
+  { en: "Full HD", ko: "풀 HD", w: 1920, h: 1080 },
+  { en: "Tablet width", ko: "태블릿 폭", w: 820, h: 1180 },
+  { en: "Phone width", ko: "휴대폰 폭", w: 390, h: 844 },
+];
+
+/** This screen's size, which the board browser reports to pages as its own. */
+const screenSize = () => ({ sw: window.screen.width, sh: window.screen.height });
+
+// ── the wheel over a page ──
+// A scroll that starts over a page scrolls the page, and the rest of that gesture (momentum included) stays with it even
+// if the pointer slides off. A scroll that starts on the board stays with the board when it passes over a page. A pinch
+// (or ⌘/Ctrl+wheel) always zooms the board.
+const GESTURE_GAP_MS = 250; // a pause this long ends a gesture
+const wheelSinks = new WeakMap<Element, (e: WheelEvent) => void>();
+const gesture: { page: Element | null; at: number } = { page: null, at: -Infinity };
+function routeWheel(e: WheelEvent) {
+  if (e.ctrlKey || e.metaKey) return;
+  if (e.timeStamp - gesture.at > GESTURE_GAP_MS) {
+    const target = e.target instanceof Element ? e.target : null;
+    const page = target?.closest(".browser-page") ?? null;
+    gesture.page = page && !target!.closest(".nowheel, .browser-overlay") ? page : null;
+  }
+  gesture.at = e.timeStamp;
+  const sink = gesture.page && wheelSinks.get(gesture.page);
+  if (!sink) return;
+  e.preventDefault();
+  e.stopPropagation(); // before the board's own wheel handling (zoom, Shift+wheel pan)
+  sink(e);
+}
+if (typeof window !== "undefined") {
+  const w = window as unknown as { __browserWheel?: (e: WheelEvent) => void };
+  if (w.__browserWheel) window.removeEventListener("wheel", w.__browserWheel, { capture: true }); // hot reload
+  w.__browserWheel = routeWheel;
+  window.addEventListener("wheel", routeWheel, { capture: true, passive: false });
+}
+
+export function BrowserView({ tool, onNotice }: { tool: Tool; onNotice: (m: string) => void }) {
   const api = useApi();
   const t = useT();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -93,6 +132,8 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
   const [fileChooser, setFileChooser] = useState<{ multiple: boolean } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [tabsOpen, setTabsOpen] = useState(false);
+  const [sizeOpen, setSizeOpen] = useState(false);
+  const [pageSize, setPageSize] = useState({ w: 0, h: 0 });
   const composing = useRef(false);
   const [caret, setCaret] = useState({ x: 0, y: 0 });
   const [promptText, setPromptText] = useState("");
@@ -115,10 +156,14 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
     let retry = 0;
     let timer: number | undefined;
     let decoding = false;
-    let pending: Blob | null = null;
-    const draw = async (blob: Blob) => {
+    let pending: { ws: WebSocket; blob: Blob } | null = null;
+    let shown = false;
+    // Each frame is acknowledged once drawn or dropped: the server sends more only then, so frames never pile up here.
+    const ack = (ws: WebSocket) => ws.readyState === WebSocket.OPEN && ws.send('{"t":"ack"}');
+    const draw = async (ws: WebSocket, blob: Blob) => {
       if (decoding) {
-        pending = blob; // only the newest frame matters
+        if (pending) ack(pending.ws); // only the newest frame matters
+        pending = { ws, blob };
         return;
       }
       decoding = true;
@@ -131,17 +176,18 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
             c.height = bmp.height;
           }
           c.getContext("2d")?.drawImage(bmp, 0, 0);
-          setHasFrame(true);
+          if (!shown) setHasFrame((shown = true));
         }
         bmp.close();
       } catch {
         /* a broken frame: skip it */
       } finally {
+        ack(ws);
         decoding = false;
         if (pending) {
           const next = pending;
           pending = null;
-          void draw(next);
+          void draw(next.ws, next.blob);
         }
       }
     };
@@ -153,12 +199,12 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
         retry = 0;
         setConnected(true);
         const { w, h } = sizeRef.current;
-        if (w && h) ws.send(JSON.stringify({ t: "viewport", w, h }));
+        if (w && h) ws.send(JSON.stringify({ t: "viewport", w, h, ...screenSize() }));
         if (!onScreenRef.current) ws.send(JSON.stringify({ t: "pause" }));
         for (const m of outbox.current.splice(0)) ws.send(JSON.stringify(m));
       };
       ws.onmessage = (e) => {
-        if (typeof e.data !== "string") return void draw(e.data as Blob);
+        if (typeof e.data !== "string") return void draw(ws, e.data as Blob);
         const msg = JSON.parse(e.data);
         switch (msg.t) {
           case "state":
@@ -210,7 +256,8 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
       const h = el.offsetHeight;
       if (!w || !h || (w === sizeRef.current.w && h === sizeRef.current.h)) return;
       sizeRef.current = { w, h };
-      send({ t: "viewport", w, h });
+      setPageSize({ w, h });
+      send({ t: "viewport", w, h, ...screenSize() });
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -253,6 +300,7 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
     e.preventDefault();
     e.stopPropagation();
     setTabsOpen(false);
+    setSizeOpen(false);
     const p = toPage(e);
     focusKeys(p);
     send({ t: "mouse", type: "down", ...p, button: e.button, buttons: e.buttons, clickCount: e.detail || 1, mods: modsOf(e) });
@@ -274,19 +322,30 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
     send({ t: "mouse", type: "move", ...toPage(e), buttons: 0, mods: modsOf(e) });
   };
 
-  // Once the frame is selected, the wheel scrolls the page instead of zooming the board.
+  // This page's share of the wheel (see routeWheel). The page moves as far as the fingers do on screen, at any board zoom.
   useEffect(() => {
-    const c = canvasRef.current;
-    if (!c || !selected) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const unit = e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? sizeRef.current.h : 1;
-      send({ t: "wheel", ...toPage(e), dx: e.deltaX * unit, dy: e.deltaY * unit, mods: modsOf(e) });
-    };
-    c.addEventListener("wheel", onWheel, { passive: false });
-    return () => c.removeEventListener("wheel", onWheel);
-  }, [send, selected]); // eslint-disable-line react-hooks/exhaustive-deps
+    const el = pageRef.current;
+    if (!el) return;
+    wheelSinks.set(el, (e) => {
+      const r = canvasRef.current?.getBoundingClientRect();
+      const { w, h } = sizeRef.current;
+      if (!r?.width || !r.height || !w || !h) return;
+      const k = w / r.width; // page px per screen px
+      const unit = e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? r.height : 1;
+      let dx = e.deltaX * unit * k;
+      let dy = e.deltaY * unit * k;
+      let mods = modsOf(e);
+      if (e.shiftKey && !dx) {
+        [dx, dy] = [dy, 0]; // Shift+wheel scrolls sideways
+        mods &= ~8;
+      }
+      // Under the pointer, kept inside the page (a gesture may slide off it).
+      const x = Math.round(Math.min(w - 1, Math.max(0, ((e.clientX - r.left) / r.width) * w)));
+      const y = Math.round(Math.min(h - 1, Math.max(0, ((e.clientY - r.top) / r.height) * h)));
+      send({ t: "wheel", x, y, dx, dy, mods });
+    });
+    return () => void wheelSinks.delete(el);
+  }, [send]);
 
   // ── keyboard: a hidden textarea takes the keys. IME composition (Korean, Japanese…) is mirrored into the page,
   // so the page composes in place as in a normal browser. The textarea is never changed while composing. ──
@@ -346,6 +405,11 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
     } catch (err) {
       onNotice((err as Error).message);
     }
+  };
+  // The page is as big as its frame: a page size is a frame size.
+  const setPageSizeTo = (size: { w: number; h: number }) => {
+    setSizeOpen(false);
+    api.setLayout(tool.id, browserFrameFor(size)).catch((err: Error) => onNotice(err.message));
   };
   const pickFiles = async (files: FileList | null) => {
     setFileChooser(null);
@@ -407,7 +471,7 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
         />
         {(v?.tabs.length ?? 0) > 1 && (
           <div className="browser-tabs">
-            <button className="ghost" onClick={() => setTabsOpen((o) => !o)} aria-expanded={tabsOpen} title={t("Tabs", "탭")}>
+            <button className="ghost" onClick={() => (setTabsOpen((o) => !o), setSizeOpen(false))} aria-expanded={tabsOpen} title={t("Tabs", "탭")}>
               {t(`${v!.tabs.length} tabs`, `탭 ${v!.tabs.length}개`)} ▾
             </button>
             {tabsOpen && (
@@ -426,6 +490,27 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
             )}
           </div>
         )}
+        <div className="browser-tabs">
+          <button
+            className="ghost browser-size"
+            onClick={() => (setSizeOpen((o) => !o), setTabsOpen(false))}
+            aria-expanded={sizeOpen}
+            title={t("Page size: drag the frame's edges, or pick a size", "페이지 크기: 프레임 가장자리를 끌거나 크기를 고르세요")}
+          >
+            {pageSize.w && pageSize.h ? `${pageSize.w}×${pageSize.h}` : t("Size", "크기")} ▾
+          </button>
+          {sizeOpen && (
+            <div className="browser-menu" role="menu">
+              {PAGE_SIZES.map((s) => (
+                <div key={s.en} className={`browser-menu-row${s.w === pageSize.w && s.h === pageSize.h ? " on" : ""}`}>
+                  <button className="ghost" role="menuitem" onClick={() => setPageSizeTo(s)}>
+                    {t(s.en, s.ko)} <span className="browser-size-dims">{`${s.w}×${s.h}`}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         {person ? (
           <button className="primary" onClick={() => setControl("shared")} title={t("Let Claude use the browser again", "Claude가 다시 브라우저를 쓰게 합니다")}>
             {t("Hand back to Claude", "Claude에게 돌려주기")}
@@ -437,7 +522,7 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
         )}
       </div>
       {v?.loading && <div className="browser-progress" />}
-      <div ref={pageRef} className={`browser-page nodrag nopan${selected ? " nowheel" : ""}`}>
+      <div ref={pageRef} className="browser-page nodrag nopan">
         <canvas ref={canvasRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onContextMenu={(e) => (e.preventDefault(), e.stopPropagation())} />
         <textarea
           ref={keysRef}
@@ -497,7 +582,7 @@ export function BrowserView({ tool, selected, onNotice }: { tool: Tool; selected
         {select && (
           <div className="browser-overlay" onMouseDown={(e) => (e.stopPropagation(), setSelect(null))}>
             <div
-              className="browser-select"
+              className="browser-select nowheel"
               role="listbox"
               style={{ left: pct(select.rect.x, vw), top: pct(select.rect.y + select.rect.h, vh), minWidth: pct(select.rect.w, vw) }}
               onMouseDown={(e) => e.stopPropagation()}

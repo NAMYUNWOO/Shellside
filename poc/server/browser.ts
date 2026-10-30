@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type { WebSocket } from "ws";
 import { browserUrlProblem, type Actor, type Tool } from "../shared/catalog.ts";
 import { Board, BoardError } from "./board.ts";
-import { BROWSER_SCALE, CdpError, Chrome } from "./cdp.ts";
+import { BROWSER_SCALE, CdpError, Chrome, withTimeout } from "./cdp.ts";
 
 const INPAGE = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "browser-inpage.js"), "utf8");
 const WORLD = "shellside";
@@ -18,6 +18,8 @@ const MAC = process.platform === "darwin";
 const OPEN = 1; // WebSocket.OPEN
 const DEBUG = !!process.env.WB_DEBUG_BROWSER; // log the person's input and what became of it
 const INPUT_TIMEOUT_MS = 5000; // one stuck input command must not block everything typed after it
+const MAX_INFLIGHT = 2; // frames on their way to one view before it says it drew one
+const ACK_STALE_MS = 1500; // a view that acknowledges nothing this long (an old page?) is not waited for
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -56,6 +58,7 @@ interface Tab {
   dialogWaiters: Set<() => void>;
   fileChooser?: { backendNodeId: number; multiple: boolean };
   history: { canBack: boolean; canForward: boolean };
+  windowId?: number;
   off: () => void;
 }
 
@@ -63,13 +66,36 @@ interface Viewport {
   w: number;
   h: number;
   dsf: number;
+  /** The screen the page reports (CSS px): the person's own, or a common one until a board view says. */
+  sw: number;
+  sh: number;
+}
+
+/** Chrome's tab strip and toolbar: a window is this much taller than its page (what headless Chrome reports too). */
+const WINDOW_FRAME_H = 87;
+const DEFAULT_SCREEN = { w: 1440, h: 900 };
+
+/** A screen the window fits on (headless Chrome alone reports 400×300, smaller than any window). */
+function fitScreen(sw: number, sh: number, w: number, h: number) {
+  return { sw: Math.round(Math.max(sw, w)), sh: Math.round(Math.max(sh, h + WINDOW_FRAME_H)) };
+}
+
+/**
+ * One board view's frame stream. A view acknowledges each frame once it has drawn (or dropped) it; at most
+ * MAX_INFLIGHT are on their way, and the newest frame waits for room. Pictures never pile up behind a slow view.
+ */
+interface View {
+  paused: boolean; // off screen: no frames
+  inflight: number;
+  next: Buffer | null;
+  sentAt: number;
 }
 
 /** The frame's layout → the page viewport, before any board view has measured it. */
 function viewportFromLayout(t: Tool): Viewport {
   const w = Math.max(320, (t.layout?.w ?? 960) - 2);
   const h = Math.max(200, (t.layout?.h ?? 640) - 2 - 40);
-  return { w, h, dsf: BROWSER_SCALE };
+  return { w, h, dsf: BROWSER_SCALE, ...fitScreen(DEFAULT_SCREEN.w, DEFAULT_SCREEN.h, w, h) };
 }
 
 /** What the person typed into the address bar → a URL (a search when it does not look like one). */
@@ -83,10 +109,12 @@ export function addressToUrl(input: string): string {
   return `https://www.google.com/search?q=${encodeURIComponent(s)}`;
 }
 
+// A plain list: Chrome adds the q-weights itself (given here, they ended up twice in the header and inside
+// navigator.languages, which looks forged).
 function acceptLanguage() {
   const loc = Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
   const base = loc.split("-")[0];
-  return base === "en" ? `${loc},en;q=0.9` : `${loc},${base};q=0.9,en-US;q=0.8,en;q=0.7`;
+  return base === "en" ? `${loc},en` : `${loc},${base},en-US,en`;
 }
 
 // ── keys ─────────────────────────────────────────────────────────────────────
@@ -149,8 +177,10 @@ export class BrowserTool {
   tabs: Tab[] = [];
   active = 0;
   readonly viewers = new Set<WebSocket>();
-  /** Views that are off screen right now: they stay connected but get no frames. */
-  private paused = new Set<WebSocket>();
+  private views = new Map<WebSocket, View>();
+  /** Frames Chrome waits on: it sends the next one only after this acknowledgement. */
+  private chromeAcks: (() => void)[] = [];
+  private ackTimer: NodeJS.Timeout | null = null;
   viewport: Viewport;
   lastUsed = Date.now();
   agentBusy = false;
@@ -243,7 +273,13 @@ export class BrowserTool {
       s("Page.setLifecycleEventsEnabled", { enabled: true }),
       s("Emulation.setFocusEmulationEnabled", { enabled: true }),
       s("Page.setInterceptFileChooserDialog", { enabled: true }),
-      this.chrome.userAgent ? s("Emulation.setUserAgentOverride", { userAgent: this.chrome.userAgent, acceptLanguage: acceptLanguage() }) : null,
+      this.chrome.userAgent
+        ? s("Emulation.setUserAgentOverride", {
+            userAgent: this.chrome.userAgent,
+            acceptLanguage: acceptLanguage(),
+            ...(this.chrome.userAgentMetadata ? { userAgentMetadata: this.chrome.userAgentMetadata } : {}),
+          })
+        : null,
       s("Page.addScriptToEvaluateOnNewDocument", { source: INPAGE, worldName: WORLD, runImmediately: true }),
       this.applyViewport(tab),
     ]);
@@ -262,6 +298,7 @@ export class BrowserTool {
     this.active = 0;
     this.casting = null;
     this.lastFrame = null;
+    this.chromeAcks = [];
     this.broadcast(this.viewState());
     if (this.viewers.size && !this.closed) setTimeout(() => this.viewers.size && this.ensureOpen().catch(() => {}), 1500);
   }
@@ -273,6 +310,7 @@ export class BrowserTool {
     this.active = 0;
     this.casting = null;
     this.lastFrame = null;
+    this.chromeAcks = [];
     for (const tab of tabs) {
       tab.off();
       await this.chrome.send("Target.closeTarget", { targetId: tab.targetId }).catch(() => {});
@@ -283,6 +321,8 @@ export class BrowserTool {
     this.closed = true;
     for (const ws of this.viewers) ws.close();
     this.viewers.clear();
+    this.views.clear();
+    if (this.ackTimer) clearTimeout(this.ackTimer);
     await this.closeTabs();
   }
 
@@ -485,6 +525,7 @@ export class BrowserTool {
   // ── viewers (board views) ─────────────────────────────────────────────────
   async addViewer(ws: WebSocket) {
     this.viewers.add(ws);
+    this.views.set(ws, { paused: false, inflight: 0, next: null, sentAt: 0 });
     this.lastUsed = Date.now();
     ws.send(JSON.stringify(this.viewState()));
     try {
@@ -494,52 +535,83 @@ export class BrowserTool {
       return;
     }
     ws.send(JSON.stringify(this.viewState()));
-    if (this.lastFrame) ws.send(this.lastFrame, { binary: true });
+    if (this.lastFrame) this.queueFrame(ws, this.lastFrame);
     await this.updateCast(!this.lastFrame);
   }
 
   /** Views that show the page now (connected and on screen). */
   private get watching() {
-    return this.viewers.size - [...this.paused].filter((ws) => this.viewers.has(ws)).length;
+    let n = 0;
+    for (const v of this.views.values()) if (!v.paused) n++;
+    return n;
   }
 
   private setPaused(ws: WebSocket, paused: boolean) {
-    if (paused === this.paused.has(ws)) return;
-    if (paused) this.paused.add(ws);
-    else {
-      this.paused.delete(ws);
-      if (this.lastFrame && ws.readyState === OPEN) ws.send(this.lastFrame, { binary: true });
-    }
+    const v = this.views.get(ws);
+    if (!v || v.paused === paused) return;
+    v.paused = paused;
+    if (paused) v.next = null;
+    else if (this.lastFrame) this.queueFrame(ws, this.lastFrame);
+    this.releaseChrome();
     void this.updateCast();
   }
 
   removeViewer(ws: WebSocket) {
     this.viewers.delete(ws);
-    this.paused.delete(ws);
+    this.views.delete(ws);
     this.lastUsed = Date.now();
+    this.releaseChrome();
     void this.updateCast();
   }
 
-  setViewport(w: number, h: number) {
-    const next: Viewport = {
-      w: Math.round(Math.max(200, Math.min(2400, w || 0))),
-      h: Math.round(Math.max(150, Math.min(2000, h || 0))),
-      dsf: BROWSER_SCALE, // fixed: the board scales the picture to each screen
-    };
+  /** sw, sh: the screen of the board view that measured this (kept when a view does not say). */
+  setViewport(w: number, h: number, sw?: number, sh?: number) {
     const cur = this.viewport;
-    if (next.w === cur.w && next.h === cur.h && next.dsf === cur.dsf) return;
+    const nw = Math.round(Math.max(200, Math.min(2400, w || 0)));
+    const nh = Math.round(Math.max(150, Math.min(2000, h || 0)));
+    const screenOk = (n?: number): n is number => Number.isFinite(n) && n! >= 320 && n! <= 10000;
+    const next: Viewport = {
+      w: nw,
+      h: nh,
+      dsf: BROWSER_SCALE, // fixed: the board scales the picture to each screen
+      ...fitScreen(screenOk(sw) ? sw : cur.sw, screenOk(sh) ? sh : cur.sh, nw, nh),
+    };
+    if (next.w === cur.w && next.h === cur.h && next.dsf === cur.dsf && next.sw === cur.sw && next.sh === cur.sh) return;
     this.viewport = next;
-    // The stream keeps running: a resized page repaints, and frames come at the new size.
+    // The stream keeps running: a resized page repaints, and frames come at the new size. Chrome sometimes sends one
+    // more frame at the old size after that, and a still page would keep showing it: send a fresh picture once the
+    // size has settled.
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
-      this.resizeTimer = null;
+      this.resizeTimer = setTimeout(() => {
+        this.resizeTimer = null;
+        if (this.tab) void this.sendStill(this.tab);
+      }, 300);
       for (const tab of this.tabs) void this.applyViewport(tab);
     }, 60);
   }
 
-  private applyViewport(tab: Tab) {
-    const { w, h, dsf } = this.viewport;
-    return this.send(tab, "Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: dsf, mobile: false }).catch(() => {});
+  /** One picture of the tab now, for the board views (a page that does not repaint sends no frames). */
+  private async sendStill(tab: Tab) {
+    if (this.casting !== tab.sessionId) return;
+    const shot = await this.send(tab, "Page.captureScreenshot", { format: "jpeg", quality: 75 }).catch(() => null);
+    if (shot?.data && this.casting === tab.sessionId) this.onFrame(tab, shot.data, null);
+  }
+
+  private async applyViewport(tab: Tab) {
+    const { w, h, dsf, sw, sh } = this.viewport;
+    await Promise.all([
+      this.send(tab, "Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: dsf, mobile: false, screenWidth: sw, screenHeight: sh }).catch(() => {}),
+      this.sizeWindow(tab, w, h + WINDOW_FRAME_H),
+    ]);
+  }
+
+  /** The tab's window around its page, so window.outerWidth/outerHeight are not smaller than the page. */
+  private async sizeWindow(tab: Tab, width: number, height: number) {
+    try {
+      tab.windowId ??= (await this.chrome.send("Browser.getWindowForTarget", { targetId: tab.targetId })).windowId as number;
+      await this.chrome.send("Browser.setWindowBounds", { windowId: tab.windowId, bounds: { width, height } });
+    } catch {}
   }
 
   /** Stream the active tab while someone watches. restart: the active tab changed. Runs one at a time. */
@@ -557,24 +629,75 @@ export class BrowserTool {
     if (!want || !this.tab) return;
     // Frames come only when the page repaints, at its real size (the limits are just generous caps).
     await this.chrome.send("Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: 4800, maxHeight: 4000, everyNthFrame: 1 }, want).catch(() => {});
-    // A page that does not repaint sends nothing: send one picture now.
-    const tab = this.tab;
-    const shot = await this.send(tab, "Page.captureScreenshot", { format: "jpeg", quality: 75 }).catch(() => null);
-    if (shot?.data && this.casting === tab.sessionId) this.onFrame(tab, shot.data, null);
+    await this.sendStill(this.tab);
   }
 
-  private onFrame(tab: Tab, data: string, frameSession: number | null) {
-    const ack = () => frameSession !== null && this.send(tab, "Page.screencastFrameAck", { sessionId: frameSession }).catch(() => {});
-    if (tab.sessionId !== this.casting) return void ack();
-    const buf = Buffer.from(data, "base64");
+  /** A picture of the page: from the screencast (data is the decoded JPEG) or a one-off screenshot (base64, no ack). */
+  private onFrame(tab: Tab, data: Buffer | string, frameSession: number | null) {
+    const ack = () => void this.send(tab, "Page.screencastFrameAck", { sessionId: frameSession }).catch(() => {});
+    if (tab.sessionId !== this.casting) return void (frameSession !== null && ack());
+    const buf = typeof data === "string" ? Buffer.from(data, "base64") : data;
     this.lastFrame = buf;
-    let pending = 0;
-    for (const ws of this.viewers) {
-      if (ws.readyState !== OPEN || this.paused.has(ws) || ws.bufferedAmount > 4 * 1024 * 1024) continue; // a slow view skips frames
-      pending++;
-      ws.send(buf, { binary: true }, () => --pending === 0 && ack());
+    for (const ws of this.views.keys()) this.queueFrame(ws, buf);
+    if (frameSession !== null) this.chromeAcks.push(ack);
+    this.releaseChrome();
+  }
+
+  /** The newest picture for one view: sent now if it has room, else it replaces the one waiting. */
+  private queueFrame(ws: WebSocket, buf: Buffer) {
+    const v = this.views.get(ws);
+    if (!v || v.paused) return;
+    v.next = buf;
+    this.pump(ws, v);
+  }
+
+  private pump(ws: WebSocket, v: View) {
+    if (!v.next || ws.readyState !== OPEN) return;
+    if (v.inflight >= MAX_INFLIGHT) {
+      if (Date.now() - v.sentAt < ACK_STALE_MS) return;
+      v.inflight = 0; // its acknowledgements went missing: start over rather than freeze
     }
-    if (pending === 0) ack();
+    const buf = v.next;
+    v.next = null;
+    v.inflight++;
+    v.sentAt = Date.now();
+    ws.send(buf, { binary: true });
+  }
+
+  /** A view drew (or dropped) a frame: it has room for the next. */
+  private frameDrawn(ws: WebSocket) {
+    const v = this.views.get(ws);
+    if (!v) return;
+    v.inflight = Math.max(0, v.inflight - 1);
+    this.pump(ws, v);
+    this.releaseChrome();
+  }
+
+  /**
+   * Let Chrome make the next frame unless every view already has one waiting: Chrome captures while the views draw,
+   * so frames come as fast as the fastest view draws, and at most one frame per view is ever thrown away.
+   */
+  private releaseChrome() {
+    if (!this.chromeAcks.length) return;
+    let ready = this.watching === 0;
+    for (const [ws, v] of this.views) if (!v.paused && ws.readyState === OPEN && !v.next) ready = true;
+    if (ready) {
+      if (this.ackTimer) clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+      for (const ack of this.chromeAcks.splice(0)) ack();
+      return;
+    }
+    // Every view is behind. One that never answers (an old page, a stuck tab) must not freeze the others.
+    this.ackTimer ??= setTimeout(() => {
+      this.ackTimer = null;
+      for (const [ws, v] of this.views) {
+        if (v.inflight >= MAX_INFLIGHT && Date.now() - v.sentAt >= ACK_STALE_MS) {
+          v.inflight = 0;
+          this.pump(ws, v);
+        }
+      }
+      this.releaseChrome();
+    }, ACK_STALE_MS);
   }
 
   // ── the person's input from a board view ──────────────────────────────────
@@ -595,6 +718,7 @@ export class BrowserTool {
   }
 
   handleViewerMessage(ws: WebSocket, msg: any) {
+    if (msg?.t === "ack") return this.frameDrawn(ws); // not activity: the view only watches
     if (DEBUG && msg?.t !== "mouse") console.log(`[browser] ${this.toolId} ← ${JSON.stringify(msg).slice(0, 160)}`);
     else if (DEBUG && msg.type !== "move") console.log(`[browser] ${this.toolId} ← mouse ${msg.type} ${msg.x},${msg.y}`);
     this.lastUsed = Date.now();
@@ -602,7 +726,7 @@ export class BrowserTool {
     const tab = this.tab;
     switch (msg?.t) {
       case "viewport":
-        return this.setViewport(Number(msg.w), Number(msg.h));
+        return this.setViewport(Number(msg.w), Number(msg.h), Number(msg.sw), Number(msg.sh));
       case "pause":
         return this.setPaused(ws, true);
       case "resume":
@@ -877,6 +1001,26 @@ export class BrowserTool {
   }
 
   /** Resolves to "dialog" if a JS dialog opens before the command returns (a click that calls alert() blocks). */
+  /**
+   * Run page JavaScript (top-level await allowed) and get its value. REPL mode awaits only an `await` in the script,
+   * not a promise the script ends with (an async function's result, or a top-level return, which runs as one), so
+   * that promise is awaited here; otherwise its value came back as {}.
+   */
+  private async evaluate(tab: Tab, expression: string): Promise<any> {
+    const objectGroup = "shellside-eval";
+    try {
+      const r = await this.send(tab, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: false, objectGroup, userGesture: true, replMode: true, timeout: 20000 });
+      if (r.exceptionDetails || !r.result?.objectId) return r; // an error, or a plain value
+      if (r.result.subtype === "promise") {
+        const settled = this.send(tab, "Runtime.awaitPromise", { promiseObjectId: r.result.objectId, returnByValue: true });
+        return await withTimeout(settled, 20000, "the script's promise did not settle within 20 s");
+      }
+      return await this.send(tab, "Runtime.callFunctionOn", { objectId: r.result.objectId, functionDeclaration: "function () { return this; }", returnByValue: true });
+    } finally {
+      void this.send(tab, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => {});
+    }
+  }
+
   private raceDialog<T>(tab: Tab, p: Promise<T>): Promise<T | "dialog"> {
     if (tab.dialog) {
       p.catch(() => {});
@@ -1252,8 +1396,7 @@ export class BrowserTool {
     if ("eval" in step) {
       const code = String(step.eval ?? "");
       if (!code.trim()) throw new BoardError('eval needs JavaScript, e.g. {"eval": "document.title"}');
-      const run = (expression: string) =>
-        this.raceDialog(tab, this.send(tab, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, userGesture: true, replMode: true, timeout: 20000 }));
+      const run = (expression: string) => this.raceDialog(tab, this.evaluate(tab, expression));
       let r: any = await run(code);
       // Statements with a top-level return: run them as the body of an async function.
       if (r !== "dialog" && /Illegal return/.test(String(r?.exceptionDetails?.exception?.description ?? r?.exceptionDetails?.text ?? ""))) r = await run(`(async () => {\n${code}\n})()`);
@@ -1410,18 +1553,18 @@ export class BoardBrowsers {
 
   /** The browser behind a "browser" tool. */
   get(toolId: string): BrowserTool {
-    const t = this.board.getTool(toolId);
+    const t = this.board.getTool(toolId); // an id or a name
     if (t.kind !== "browser") throw new BoardError(`"${t.title}" is a ${t.kind}, not a browser`);
-    let bt = this.tools.get(toolId);
+    let bt = this.tools.get(t.id);
     if (!bt) {
-      bt = new BrowserTool(this, toolId);
-      this.tools.set(toolId, bt);
+      bt = new BrowserTool(this, t.id);
+      this.tools.set(t.id, bt);
     }
     return bt;
   }
 
   /** Open an address: in an existing browser (toolId) or in a new browser tool on the board. */
-  async open(actor: Actor, input: { url: string; toolId?: string; title?: string; width?: number; height?: number }) {
+  async open(actor: Actor, input: { url: string; toolId?: string; title?: string; name?: string; width?: number; height?: number }) {
     const url = addressToUrl(String(input.url ?? ""));
     const problem = browserUrlProblem(url);
     if (problem) throw new BoardError(problem);
@@ -1436,7 +1579,7 @@ export class BoardBrowsers {
     try {
       host = url === "about:blank" ? "" : new URL(url).hostname.replace(/^www\./, "");
     } catch {}
-    const t = this.board.createTool(actor, { kind: "browser", title: input.title?.trim() || host || "Browser", state: { url }, width: input.width, height: input.height });
+    const t = this.board.createTool(actor, { kind: "browser", title: input.title?.trim() || host || "Browser", name: input.name, state: { url }, width: input.width, height: input.height });
     const bt = this.get(t.id);
     await bt.ensureOpen();
     await bt.settled(20000);
@@ -1449,7 +1592,7 @@ export class BoardBrowsers {
     const all = this.board.listTools().filter((t) => t.kind === "browser");
     if (all.length === 1) return this.get(all[0].id);
     if (!all.length) throw new BoardError("this board has no browser yet: open one with browser_open (url)", 404);
-    throw new BoardError(`this board has ${all.length} browsers; pass toolId (${all.map((t) => `${t.id} "${t.title}"`).join(", ")})`);
+    throw new BoardError(`this board has ${all.length} browsers; pass toolId (${all.map((t) => `@${t.name} (${t.id}, "${t.title}")`).join(", ")})`);
   }
 
   dispose() {
@@ -1558,8 +1701,9 @@ export class BrowserService {
     }
   }
 
+  /** Server shutdown: Chrome quits before the server does, so a quick restart finds its profile free. */
   dispose() {
-    this.chrome.kill();
+    return this.chrome.stop();
   }
 }
 

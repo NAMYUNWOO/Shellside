@@ -21,11 +21,11 @@ Open <http://127.0.0.1:5173>. The server listens only on `127.0.0.1:4100`.
 | Area | What it does |
 | --- | --- |
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
-| Center: **Canvas** | Tools sit on it as frames. Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Wheel / pinch = zoom, Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width |
-| **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here / + Browser here |
-| Right: **Inspector** | One selected: properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
+| Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Wheel / pinch = zoom (a scroll that starts over a browser page scrolls the page), Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width (a browser frame: its sides and bottom corners) |
+| **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy name · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here / + Browser here |
+| Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Claude mark inside the button when signed in to Claude, and `!` when a permission prompt is waiting |
-| Bottom: **Input box** | Sends straight to Claude, with the selected components attached as context |
+| Bottom: **Input box** | Sends straight to Claude, with the selected components attached as context. `@` suggests components by name; the ones you name are attached too |
 | **Library** | Saved components. Click one or drag it onto the canvas to reuse it |
 
 ## Language
@@ -59,7 +59,11 @@ When you send:
 | Idle / working | Pastes into Claude's input and presses Enter. If Claude is working, it queues the request |
 | Waiting on a permission prompt or dialog / starting | **Does not send.** Enter could be taken as approving a permission. Says why and opens the terminal |
 
-The selected components are attached to the request as `[WorkBoard] … Tools: - "<title>" (<kind>, id: <id>)`.
+The selected and `@`-named components are attached to the request as `[WorkBoard] … Tools: - @<name> "<title>" (<kind>, id: <id>)`,
+followed by the links that touch them (`Links: - @notes → @browser1`).
+
+Notes save themselves: what you type is the note a moment later (and when you click away), so Claude always reads
+what is on screen. There is no Edit or Save button.
 
 ## Board MCP tools (per board)
 
@@ -69,6 +73,12 @@ The selected components are attached to the request as `[WorkBoard] … Tools: -
 `channel_list` `channel_read` `channel_write` `channel_delete`
 `library_list` `library_use` `library_save`
 `browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_handoff`
+`link_create` `link_update` `link_delete`
+
+- Wherever a tool takes a `toolId`, the tool's name works too (`research` or `@research`). `board_list` returns the
+  links (`"reads": "@notes → @browser1"`, direction `none` / `forward` / `both`), `tool_read` a tool's own links, and
+  `board_wait_event` tells the agent when the person adds, turns or removes one. The agent can change or remove only
+  the links it made.
 
 - Four tool kinds (checklist, form, table, note) + **apps** (React code written by the agent, run in an isolated iframe, with state, events and files only through the `board` bridge).
 - The agent can't check checklist items marked `gate: "human"`. Once a human approves through `board_ask`, the board checks them.
@@ -99,11 +109,20 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
   or Playwright's Chromium; set `WB_CHROME` to choose). It is driven over the DevTools protocol through a **pipe**, not a
   port, so no other program or website can connect to it. Its profile (cookies, sign-ins) is separate from your own
   Chrome and lives in `data/browser/profile`. Tabs nobody has used for 10 minutes close (the address is kept), and
-  Chrome quits when no tab is left.
+  Chrome quits when no tab is left. To websites it presents itself as the browser it is (brand, version and platform
+  in the user agent and `Sec-CH-UA` headers, a clean language list, your screen's size, and no `navigator.webdriver`
+  flag). Sites still decide on their own: a fresh profile without cookies gets more CAPTCHAs, and signing in to
+  Google in the board browser usually calms them.
 - **You.** The frame shows the page live (screencast frames over `/ws/browser`, rendered at 2× so text stays sharp on
-  high-density screens). Clicks, scrolling, keys, paste and IME input (Korean, Japanese…) go to the page; IME composition happens in the page itself, as in a normal browser. Headless Chrome draws
+  high-density screens). A view acknowledges each frame it draws and gets the next only then, so a slow screen skips
+  frames instead of falling behind. Clicks, scrolling, keys, paste and IME input (Korean, Japanese…) go to the page; IME
+  composition happens in the page itself, as in a normal browser. A scroll that starts over the page scrolls it (as far
+  as your fingers move, at any board zoom) until the gesture ends, even if the pointer slides off; one that starts on
+  the board keeps zooming the board as it passes over a page; a pinch always zooms the board. Headless Chrome draws
   no dropdowns or dialogs, so the board draws them: `<select>` lists, `alert/confirm/prompt`, file pickers (files go
-  through the board's upload). Links that open new windows become tabs. Resize the frame from its right or bottom edge.
+  through the board's upload). Links that open new windows become tabs. The page is as big as its frame: drag the
+  frame's left, right or bottom edge or a bottom corner (no need to select it first), or pick a size (Desktop 1280×800,
+  Full HD 1920×1080, phone width…) from the page-size button in the address bar. Frames go up to 2400 px wide.
 - **Claude.** `browser_snapshot` turns the page into compact text where everything actionable gets a ref:
   `[@5 textbox "Email" placeholder="you@example.com"]`, `[@10 button "Send"]`. `browser_act` runs a list of steps in one
   call (`goto`, `click`, `fill`, `select`, `check`, `press`, `waitFor`, `eval`, `upload`, `dialog`, tabs…) and returns what

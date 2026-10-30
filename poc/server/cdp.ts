@@ -58,10 +58,13 @@ export class Chrome {
   private sessions = new Map<string, EventFn>();
   private rootListeners = new Set<EventFn>();
   private starting: Promise<void> | null = null;
-  private buf = "";
+  /** The start of a message that has not fully arrived yet (raw bytes, cut where a read ended). */
+  private parts: Buffer[] = [];
   /** Called when Chrome goes away (crash or kill), so tabs can forget their sessions. */
   onExit: (() => void) | null = null;
   userAgent = "";
+  /** CDP's UserAgentMetadata for this browser, to send with the user agent (null if it could not be read). */
+  userAgentMetadata: object | null = null;
 
   constructor(private profileDir: string) {}
 
@@ -97,6 +100,9 @@ export class Chrome {
       "--disable-backgrounding-occluded-windows",
       "--disable-renderer-backgrounding",
       "--disable-features=Translate,MediaRouter,DialMediaRouteProvider",
+      // The debugging pipe and headless mode set navigator.webdriver, and sites then treat every visit as a bot's
+      // (Google answers the first search with a captcha). A person drives this browser most of the time.
+      "--disable-blink-features=AutomationControlled",
       // macOS: no Keychain prompt for this separate profile (Playwright and Puppeteer do the same).
       ...(platform() === "darwin" ? ["--use-mock-keychain"] : []),
       "--mute-audio",
@@ -105,14 +111,25 @@ export class Chrome {
       `--force-device-scale-factor=${BROWSER_SCALE}`,
       "about:blank",
     ];
+    // A Chrome that is still shutting down (the server just restarted) holds the profile for a moment, and a new one
+    // started on it quits at once: try again shortly.
+    for (let attempt = 1; ; attempt++) {
+      const r = await this.start(exe, args);
+      if (r === true) return;
+      if (!r.quit || attempt === 3) throw new BoardError(`could not start the board browser (${exe}): ${r.message}`, 503);
+      await sleep(1000 * attempt);
+    }
+  }
+
+  /** One try at starting Chrome: true, or why not (quit: it exited by itself rather than hanging). */
+  private async start(exe: string, args: string[]): Promise<true | { quit: boolean; message: string }> {
     const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
     this.proc = proc;
-    this.buf = "";
+    this.parts = [];
     let stderr = "";
     proc.stderr!.on("data", (d) => (stderr = (stderr + d).slice(-2000)));
     const out = proc.stdio[4] as NodeJS.ReadableStream;
-    out.setEncoding("utf8");
-    out.on("data", (chunk: string) => this.onData(chunk));
+    out.on("data", (chunk: Buffer) => this.onData(chunk));
     proc.on("exit", () => {
       if (this.proc !== proc) return;
       this.proc = null;
@@ -125,36 +142,69 @@ export class Chrome {
     try {
       const v = await withTimeout(this.send("Browser.getVersion"), 15000, "Chrome did not start within 15s");
       this.userAgent = String(v.userAgent ?? "").replace("HeadlessChrome", "Chrome");
+      this.userAgentMetadata = await this.readUserAgentMetadata().catch(() => null);
       await this.send("Target.setDiscoverTargets", { discover: true });
+      return true;
     } catch (err) {
+      const quit = proc.exitCode !== null || proc.signalCode !== null;
       this.kill();
       const hint = stderr.trim().split("\n").slice(-3).join(" ");
-      throw new BoardError(`could not start the board browser (${exe}): ${(err as Error).message}${hint ? ` — ${hint}` : ""}`, 503);
+      return { quit, message: `${(err as Error).message}${hint ? ` — ${hint}` : ""}` };
     }
   }
 
-  private onData(chunk: string) {
-    this.buf += chunk;
+  /**
+   * The browser's own brand, version and platform (navigator.userAgentData, the Sec-CH-UA headers), read once from a
+   * throwaway tab. Overriding the user agent without them clears them, and a Chrome that sends none looks like a bot.
+   */
+  private async readUserAgentMetadata(): Promise<object | null> {
+    // userAgentData exists only on secure pages, and about:blank is not one.
+    const { targetId } = await this.send("Target.createTarget", { url: "chrome://version" });
+    try {
+      const { sessionId } = await this.send("Target.attachToTarget", { targetId, flatten: true });
+      for (let i = 0; i < 30; i++) {
+        const r = await this.send("Runtime.evaluate", { expression: UA_METADATA_JS, awaitPromise: true, returnByValue: true }, sessionId).catch(() => null);
+        const m = r?.result?.value;
+        if (m && Array.isArray(m.brands) && m.brands.length) return m;
+        await sleep(100); // still on the blank page it starts with
+      }
+      return null;
+    } finally {
+      await this.send("Target.closeTarget", { targetId }).catch(() => {});
+    }
+  }
+
+  // Messages end with a NUL byte. Only the new bytes are searched, and a message is joined once when it is complete:
+  // a screencast frame is up to a few MB and arrives in many reads.
+  private onData(chunk: Buffer) {
+    let from = 0;
     let end: number;
-    while ((end = this.buf.indexOf("\0")) >= 0) {
-      const raw = this.buf.slice(0, end);
-      this.buf = this.buf.slice(end + 1);
-      let msg: any;
-      try {
-        msg = JSON.parse(raw);
-      } catch {
-        continue;
-      }
-      if (typeof msg.id === "number") {
-        const p = this.pending.get(msg.id);
-        if (!p) continue;
-        this.pending.delete(msg.id);
-        if (msg.error) p.reject(new CdpError(msg.error.message ?? "CDP error", p.method));
-        else p.resolve(msg.result ?? {});
-      } else if (msg.method) {
-        if (msg.sessionId) this.sessions.get(msg.sessionId)?.(msg.method, msg.params ?? {});
-        else for (const fn of this.rootListeners) fn(msg.method, msg.params ?? {});
-      }
+    while ((end = chunk.indexOf(0, from)) >= 0) {
+      this.parts.push(chunk.subarray(from, end));
+      const raw = this.parts.length === 1 ? this.parts[0] : Buffer.concat(this.parts);
+      this.parts = [];
+      from = end + 1;
+      this.dispatch(raw);
+    }
+    if (from < chunk.length) this.parts.push(chunk.subarray(from));
+  }
+
+  private dispatch(raw: Buffer) {
+    let msg: any;
+    try {
+      msg = parseMessage(raw);
+    } catch {
+      return;
+    }
+    if (typeof msg.id === "number") {
+      const p = this.pending.get(msg.id);
+      if (!p) return;
+      this.pending.delete(msg.id);
+      if (msg.error) p.reject(new CdpError(msg.error.message ?? "CDP error", p.method));
+      else p.resolve(msg.result ?? {});
+    } else if (msg.method) {
+      if (msg.sessionId) this.sessions.get(msg.sessionId)?.(msg.method, msg.params ?? {});
+      else for (const fn of this.rootListeners) fn(msg.method, msg.params ?? {});
     }
   }
 
@@ -186,8 +236,52 @@ export class Chrome {
     try {
       p.kill("SIGTERM");
     } catch {}
-    setTimeout(() => p.exitCode === null && p.kill("SIGKILL"), 2000).unref();
+    setTimeout(() => p.exitCode === null && p.signalCode === null && p.kill("SIGKILL"), 2000).unref();
   }
+
+  /** Quit Chrome and wait until it is gone (at most timeoutMs), so the next server start finds its profile free. */
+  async stop(timeoutMs = 3000) {
+    const p = this.proc;
+    if (!p || p.exitCode !== null || p.signalCode !== null) return;
+    const gone = new Promise<void>((r) => p.once("exit", () => r()));
+    this.kill();
+    await Promise.race([gone, sleep(timeoutMs)]);
+    if (p.exitCode === null && p.signalCode === null) p.kill("SIGKILL");
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** navigator.userAgentData in the shape of CDP's Emulation.UserAgentMetadata. */
+const UA_METADATA_JS = `(async () => {
+  const d = navigator.userAgentData;
+  if (!d) return null;
+  const v = await d.getHighEntropyValues(["architecture", "bitness", "fullVersionList", "model", "platformVersion", "uaFullVersion", "wow64", "formFactors"]);
+  return { brands: v.brands, fullVersionList: v.fullVersionList, fullVersion: v.uaFullVersion, platform: v.platform, platformVersion: v.platformVersion,
+    architecture: v.architecture, model: v.model, mobile: v.mobile, bitness: v.bitness, wow64: v.wow64, formFactors: v.formFactors };
+})()`;
+
+const FRAME_EVENT = '"method":"Page.screencastFrame"';
+const DATA_KEY = Buffer.from('"data":"');
+
+/**
+ * One message from Chrome. Screencast frames take a short cut: the picture (base64, no escapes) is decoded straight
+ * from the bytes and only the small rest goes through JSON.parse. Their params.data is then a Buffer, not a string.
+ */
+function parseMessage(raw: Buffer): any {
+  if (raw.length > 4096 && raw.toString("latin1", 0, 80).includes(FRAME_EVENT)) {
+    const key = raw.indexOf(DATA_KEY);
+    const start = key + DATA_KEY.length;
+    const stop = key < 0 ? -1 : raw.indexOf(0x22, start); // the closing quote
+    if (stop > start) {
+      const msg = JSON.parse(raw.toString("utf8", 0, start) + raw.toString("utf8", stop));
+      if (msg?.params) {
+        msg.params.data = Buffer.from(raw.toString("latin1", start, stop), "base64");
+        return msg;
+      }
+    }
+  }
+  return JSON.parse(raw.toString("utf8"));
 }
 
 export class CdpError extends Error {

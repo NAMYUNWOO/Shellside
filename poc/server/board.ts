@@ -6,6 +6,7 @@ import { dirname } from "node:path";
 import jsonpatch from "fast-json-patch";
 import {
   BROWSER_HEIGHT,
+  BROWSER_WIDTH,
   browserUrlProblem,
   CHANNEL_MAX_BYTES,
   CHANNEL_NAME,
@@ -19,6 +20,10 @@ import {
   type BoardEvent,
   type BoardEventType,
   type FormField,
+  type Link,
+  type LinkDirection,
+  LINK_DIRECTIONS,
+  TOOL_NAME,
   type Tool,
   type ToolKind,
   TOOL_KINDS,
@@ -41,6 +46,8 @@ type Change =
   | { type: "ask"; ask: Ask }
   | { type: "channel"; channel: Channel }
   | { type: "channel_deleted"; name: string }
+  | { type: "link"; link: Link }
+  | { type: "link_deleted"; linkId: string }
   | { type: "event"; event: BoardEvent };
 
 interface Persisted {
@@ -49,6 +56,7 @@ interface Persisted {
   events: BoardEvent[];
   seq: number;
   channels?: Channel[];
+  links?: Link[];
 }
 
 const MAX_EVENTS = 500;
@@ -66,6 +74,7 @@ const AGENT_FACING: BoardEventType[] = [
   "channel_updated",
   "channel_deleted",
   "browser",
+  "link",
 ];
 
 export interface AppLog {
@@ -81,6 +90,7 @@ export class Board {
   private tools = new Map<string, Tool>();
   private asks = new Map<string, Ask>();
   private channels = new Map<string, Channel>();
+  private links = new Map<string, Link>();
   /** The newest event, if it may absorb a repeat of itself (see log's coalesce). */
   private coalescible: { key: string; seq: number } | null = null;
   private events: BoardEvent[] = [];
@@ -114,6 +124,9 @@ export class Board {
         this.asks.set(a.id, a);
       }
       for (const c of data.channels ?? []) this.channels.set(c.name, c);
+      // Boards from before names: every tool gets one, oldest first (note1, browser1, …).
+      for (const t of [...this.tools.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) if (!t.name) t.name = this.defaultName(t.kind);
+      for (const l of data.links ?? []) if (this.tools.has(l.from) && this.tools.has(l.to)) this.links.set(l.id, l);
       this.events = data.events ?? [];
       this.seq = data.seq ?? this.events.at(-1)?.seq ?? 0;
       this.agentCursor = this.seq;
@@ -132,6 +145,7 @@ export class Board {
         events: this.events,
         seq: this.seq,
         channels: [...this.channels.values()],
+        links: [...this.links.values()],
       };
       mkdirSync(dirname(this.file), { recursive: true });
       const tmp = `${this.file}.tmp`;
@@ -182,6 +196,7 @@ export class Board {
       asks: [...this.asks.values()].filter((a) => a.status === "pending"),
       events: this.events.slice(-100),
       channels: [...this.channels.values()],
+      links: [...this.links.values()],
     };
   }
 
@@ -189,13 +204,41 @@ export class Board {
     return [...this.tools.values()];
   }
 
+  /** A tool by id or by name ("note1" or "@note1"). */
   getTool(toolId: string): Tool {
-    const t = this.tools.get(toolId);
+    const t = this.tools.get(toolId) ?? this.byName(toolId);
     if (!t) {
-      const known = [...this.tools.values()].map((x) => `${x.id} (${x.title})`).join(", ") || "none";
+      const known = [...this.tools.values()].map((x) => `@${x.name} (${x.id}, "${x.title}")`).join(", ") || "none";
       throw new BoardError(`tool "${toolId}" not found. Known tools: ${known}`, 404);
     }
     return t;
+  }
+
+  /** The id behind an id or a name; anything else comes back as it is (and fails later with a clear message). */
+  resolveToolId(ref: string): string {
+    return this.tools.has(ref) ? ref : (this.byName(ref)?.id ?? ref);
+  }
+
+  private byName(ref: string): Tool | undefined {
+    const want = String(ref ?? "").trim().replace(/^@/, "").toLowerCase();
+    if (!want) return undefined;
+    for (const t of this.tools.values()) if (t.name?.toLowerCase() === want) return t;
+    return undefined;
+  }
+
+  /** kind + the first free number: note1, note2, browser1… */
+  private defaultName(kind: string) {
+    for (let n = 1; ; n++) if (!this.byName(`${kind}${n}`)) return `${kind}${n}`;
+  }
+
+  /** A valid name nobody else on the board has (case does not matter). */
+  private checkName(name: string, self?: string): string {
+    const n = String(name ?? "").trim().replace(/^@/, "");
+    if (!TOOL_NAME.test(n)) throw new BoardError(`"${n}" can't be a name: use letters, digits, _ . - (no spaces), up to 40, e.g. research or 리서치_메모`);
+    const other = this.byName(n);
+    if (other && other.id !== self) throw new BoardError(`another tool is already named @${other.name} ("${other.title}")`, 409);
+    if (this.tools.has(n) && n !== self) throw new BoardError(`"${n}" is a tool's id; pick another name`, 409);
+    return n;
   }
 
   pendingAsks() {
@@ -215,15 +258,17 @@ export class Board {
   // ── tool writes ────────────────────────────────────────────────────────────
   createTool(
     actor: Actor,
-    input: { title: string; description?: string; kind: ToolKind; props?: unknown; state?: unknown; agentAccess?: "read" | "write"; id?: string; width?: number; height?: number; at?: { x: number; y: number } },
+    input: { title: string; name?: string; description?: string; kind: ToolKind; props?: unknown; state?: unknown; agentAccess?: "read" | "write"; id?: string; width?: number; height?: number; at?: { x: number; y: number } },
   ): Tool {
     if (!TOOL_KINDS.includes(input.kind)) throw new BoardError(`unknown kind "${input.kind}". Use one of: ${TOOL_KINDS.join(", ")}`);
     const v = validateTool(input.kind, input.props, input.state);
     if (!v.ok) throw new BoardError(v.error);
     const id = input.id && !this.tools.has(input.id) ? input.id : shortId(input.kind);
+    const name = input.name ? this.checkName(input.name) : this.defaultName(input.kind);
     const compiled = input.kind === "app" ? this.compile(v.props.source) : undefined;
     const t: Tool = {
       id,
+      name,
       title: input.title.trim() || "Untitled",
       description: input.description?.trim() ?? "",
       kind: input.kind,
@@ -237,7 +282,7 @@ export class Board {
       updatedAt: now(),
       ...(compiled !== undefined ? { compiled } : {}),
     };
-    const w = clampWidth(input.width ?? DEFAULT_WIDTH[t.kind] ?? 400);
+    const w = clampWidth(input.width ?? DEFAULT_WIDTH[t.kind] ?? 400, t.kind);
     const at = input.at && Number.isFinite(input.at.x) && Number.isFinite(input.at.y) ? input.at : null;
     // A person adding a tool drops it where they are looking; the agent's tools go to the next free spot.
     t.layout = at ? { x: Math.round(at.x - w / 2), y: Math.round(at.y - 80), w } : this.autoPlace(t.kind, w, estimateHeight(t));
@@ -252,7 +297,7 @@ export class Board {
   updateTool(
     actor: Actor,
     toolId: string,
-    input: { title?: string; description?: string; props?: unknown; agentAccess?: "read" | "write"; baseVersion?: number },
+    input: { title?: string; name?: string; description?: string; props?: unknown; agentAccess?: "read" | "write"; baseVersion?: number },
   ): Tool {
     const t = this.getTool(toolId);
     this.checkAccess(actor, t);
@@ -263,9 +308,11 @@ export class Board {
     if (!v.ok) throw new BoardError(v.error);
     const compiled = t.kind === "app" && input.props !== undefined ? this.compile(v.props.source) : t.compiled;
     if (t.kind === "app" && input.props !== undefined) this.appLogs.delete(t.id); // fresh code, fresh logs
+    const name = input.name !== undefined && input.name !== t.name ? this.checkName(input.name, t.id) : t.name;
     const next: Tool = {
       ...t,
       ...(compiled !== undefined ? { compiled } : {}),
+      name,
       title: input.title?.trim() || t.title,
       description: input.description?.trim() ?? t.description,
       props: v.props,
@@ -313,7 +360,7 @@ export class Board {
     const layout: Layout = {
       x: Math.max(-100_000, Math.min(100_000, num(input.x, cur.x))),
       y: Math.max(-100_000, Math.min(100_000, num(input.y, cur.y))),
-      w: clampWidth(num(input.w, cur.w)),
+      w: clampWidth(num(input.w, cur.w), t.kind),
       ...(input.h !== undefined || cur.h !== undefined ? { h: Math.max(40, Math.min(20_000, num(input.h, cur.h ?? 300))) } : {}),
     };
     if (t.kind === "browser") layout.h = clampBrowserHeight(layout.h ?? BROWSER_HEIGHT.default);
@@ -348,9 +395,84 @@ export class Board {
   deleteTool(actor: Actor, toolId: string) {
     const t = this.getTool(toolId);
     if (actor === "agent" && t.createdBy !== "agent") throw new BoardError("the agent can only delete tools it created", 403);
-    this.tools.delete(toolId);
-    this.emit({ type: "tool_deleted", toolId });
-    this.log(actor, "tool_deleted", [`Deleted "${t.title}"`, `"${t.title}" 도구 삭제`], { toolId });
+    this.tools.delete(t.id);
+    for (const l of [...this.links.values()]) {
+      if (l.from !== t.id && l.to !== t.id) continue;
+      this.links.delete(l.id);
+      this.emit({ type: "link_deleted", linkId: l.id });
+    }
+    this.emit({ type: "tool_deleted", toolId: t.id });
+    this.log(actor, "tool_deleted", [`Deleted "${t.title}"`, `"${t.title}" 도구 삭제`], { toolId: t.id });
+  }
+
+  // ── links: lines between tools ────────────────────────────────────────────
+  listLinks() {
+    return [...this.links.values()];
+  }
+
+  /** The links that touch a tool. */
+  linksOf(toolId: string) {
+    return this.listLinks().filter((l) => l.from === toolId || l.to === toolId);
+  }
+
+  /** "@note1 → @browser1" (what the agent and the history read). */
+  describeLink(l: Link) {
+    const a = `@${this.tools.get(l.from)?.name ?? l.from}`;
+    const b = `@${this.tools.get(l.to)?.name ?? l.to}`;
+    return l.direction === "forward" ? `${a} → ${b}` : l.direction === "both" ? `${a} ↔ ${b}` : `${a} — ${b}`;
+  }
+
+  getLink(linkId: string): Link {
+    const l = this.links.get(linkId);
+    if (!l) throw new BoardError(`link "${linkId}" not found. Links: ${this.listLinks().map((x) => `${x.id} (${this.describeLink(x)})`).join(", ") || "none"}`, 404);
+    return l;
+  }
+
+  /** Link two tools. A pair that is already linked keeps its one link (it comes back as it is). */
+  createLink(actor: Actor, input: { from: string; to: string; direction?: LinkDirection }): Link {
+    const a = this.getTool(String(input.from ?? ""));
+    const b = this.getTool(String(input.to ?? ""));
+    if (a.id === b.id) throw new BoardError("a link needs two different tools");
+    const direction = this.checkDirection(input.direction ?? "none");
+    const same = this.listLinks().find((l) => (l.from === a.id && l.to === b.id) || (l.from === b.id && l.to === a.id));
+    if (same) return same;
+    const l: Link = { id: shortId("link"), from: a.id, to: b.id, direction, createdBy: actor, createdAt: now(), updatedAt: now() };
+    this.links.set(l.id, l);
+    this.emit({ type: "link", link: l });
+    const d = this.describeLink(l);
+    this.log(actor, "link", [`Linked ${d}`, `연결: ${d}`], { linkId: l.id, toolId: b.id });
+    return l;
+  }
+
+  /** Change a link's direction, or which end is which (from/to swapped makes "forward" point the other way). */
+  updateLink(actor: Actor, linkId: string, input: { direction?: LinkDirection; from?: string; to?: string }): Link {
+    const l = this.getLink(linkId);
+    if (actor === "agent" && l.createdBy !== "agent") throw new BoardError("the agent can only change links it made; ask the person", 403);
+    const from = input.from !== undefined ? this.getTool(String(input.from)).id : l.from;
+    const to = input.to !== undefined ? this.getTool(String(input.to)).id : l.to;
+    const ends = new Set([l.from, l.to]);
+    if (!ends.has(from) || !ends.has(to) || from === to) throw new BoardError("from and to must be this link's two tools (swap them to turn it around)");
+    const next: Link = { ...l, from, to, direction: input.direction !== undefined ? this.checkDirection(input.direction) : l.direction, updatedAt: now() };
+    if (next.from === l.from && next.direction === l.direction) return l;
+    this.links.set(l.id, next);
+    this.emit({ type: "link", link: next });
+    const d = this.describeLink(next);
+    this.log(actor, "link", [`Changed a link: ${d}`, `연결 변경: ${d}`], { linkId: l.id, toolId: next.to });
+    return next;
+  }
+
+  deleteLink(actor: Actor, linkId: string) {
+    const l = this.getLink(linkId);
+    if (actor === "agent" && l.createdBy !== "agent") throw new BoardError("the agent can only remove links it made; ask the person", 403);
+    const d = this.describeLink(l);
+    this.links.delete(l.id);
+    this.emit({ type: "link_deleted", linkId: l.id });
+    this.log(actor, "link", [`Removed the link ${d}`, `연결 삭제: ${d}`], { linkId: l.id });
+  }
+
+  private checkDirection(d: unknown): LinkDirection {
+    if (!LINK_DIRECTIONS.includes(d as LinkDirection)) throw new BoardError(`direction must be one of: ${LINK_DIRECTIONS.join(", ")}`);
+    return d as LinkDirection;
   }
 
   private checkAccess(actor: Actor, t: Tool) {
@@ -646,7 +768,8 @@ export class Board {
   }
 }
 
-const clampWidth = (w: number) => Math.max(240, Math.min(1600, Math.round(w)));
+const clampWidth = (w: number, kind?: string) =>
+  kind === "browser" ? Math.max(BROWSER_WIDTH.min, Math.min(BROWSER_WIDTH.max, Math.round(w))) : Math.max(240, Math.min(1600, Math.round(w)));
 const clampBrowserHeight = (h: number) => Math.max(BROWSER_HEIGHT.min, Math.min(BROWSER_HEIGHT.max, Math.round(Number(h) || BROWSER_HEIGHT.default)));
 
 /** Rough frame height before the board has measured it. */

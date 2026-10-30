@@ -8,6 +8,7 @@
   --muted: #6b6a65;
   --accent: #0d99ff; /* Figma selection blue */
   --accent-soft: #e5f4ff;
+  --link: #8f8e88; /* lines between frames */
   --agent: #7c4dd6;
   --agent-soft: #efe7fd;
   --warn: #b26a00;
@@ -31,6 +32,7 @@
     --muted: #9b9a94;
     --accent: #2ea8ff;
     --accent-soft: #10304a;
+    --link: #7d7c77;
     --agent: #b294ff;
     --agent-soft: #2a2140;
     --warn: #f0b252;
@@ -328,6 +330,16 @@ textarea:focus {
 .frame-kind {
   font-size: 11px;
 }
+/* The name requests to Claude use (@note1). */
+.frame-name {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
 .frame-body {
   position: relative;
   user-select: text;
@@ -338,9 +350,62 @@ textarea:focus {
   inset: 0;
   cursor: pointer;
 }
+/* Resize grips: a hit area about 12 screen px across at any zoom, centred on the frame's edge. The line or corner
+   shows while the frame is selected or the pointer is on it. */
+.canvas-wrap .react-flow__resize-control {
+  z-index: 5;
+}
+.canvas-wrap .react-flow__resize-control.line {
+  border-width: 0;
+  background: transparent;
+}
+.canvas-wrap .react-flow__resize-control.line.left,
 .canvas-wrap .react-flow__resize-control.line.right {
-  border-right-width: 3px;
-  border-color: var(--accent);
+  width: calc(12px / var(--z, 1));
+}
+.canvas-wrap .react-flow__resize-control.line.top,
+.canvas-wrap .react-flow__resize-control.line.bottom {
+  height: calc(12px / var(--z, 1));
+}
+.canvas-wrap .react-flow__resize-control.line::after {
+  content: "";
+  position: absolute;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.canvas-wrap .react-flow__resize-control.line.left::after,
+.canvas-wrap .react-flow__resize-control.line.right::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: calc(3px / var(--z, 1));
+  transform: translateX(-50%);
+}
+.canvas-wrap .react-flow__resize-control.line.top::after,
+.canvas-wrap .react-flow__resize-control.line.bottom::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: calc(3px / var(--z, 1));
+  transform: translateY(-50%);
+}
+.canvas-wrap .frame.selected > .react-flow__resize-control.line::after,
+.canvas-wrap .react-flow__resize-control.line:hover::after {
+  opacity: 1;
+}
+.canvas-wrap .react-flow__resize-control.handle {
+  width: calc(12px / var(--z, 1));
+  height: calc(12px / var(--z, 1));
+  border: calc(2px / var(--z, 1)) solid var(--accent);
+  border-radius: calc(3px / var(--z, 1));
+  background: var(--panel);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.canvas-wrap .frame:hover > .react-flow__resize-control.handle,
+.canvas-wrap .frame.selected > .react-flow__resize-control.handle {
+  opacity: 1;
 }
 
 /* overlays on the canvas */
@@ -400,11 +465,52 @@ textarea:focus {
   background: var(--panel);
   box-shadow: var(--float);
 }
-.commandbar input {
+.commandbar .cmd-input {
+  position: relative;
   flex: 1;
   min-width: 60px;
+  display: flex;
+}
+.commandbar .cmd-input input {
+  flex: 1;
+  min-width: 0;
   border-color: transparent;
   background: var(--bg);
+}
+/* @name suggestions, above the box (the bar sits at the bottom of the board). */
+.mention-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--float);
+}
+.mention-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+.mention-menu button.on {
+  background: var(--accent-soft);
+}
+.mention-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
 }
 .commandbar .sep {
   width: 1px;
@@ -458,6 +564,28 @@ details.insp-section[open] summary {
   padding-left: 4px !important;
 }
 .insp-title:hover {
+  border-color: var(--line) !important;
+}
+.insp-name {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  padding-left: 4px;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.insp-name input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: inherit;
+  border-color: transparent !important;
+  padding-left: 2px !important;
+}
+.insp-name input:hover,
+.insp-name input:focus {
   border-color: var(--line) !important;
 }
 .insp-desc {
@@ -838,10 +966,26 @@ b.agent {
 .row-del {
   width: 28px;
 }
-.note-tool pre {
-  white-space: pre-wrap;
+/* The note is its text: no box, no scroll bar (it grows), a soft tint while typing. */
+.note-tool textarea {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+  margin: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: var(--text);
   font: inherit;
-  margin: 0 0 6px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.note-tool textarea:focus {
+  background: var(--bg);
 }
 .app-frame {
   display: block;
@@ -1586,6 +1730,52 @@ body.wb-panning iframe,
   pointer-events: none;
 }
 
+/* ── links between frames ── */
+/* Every frame has one handle (a line needs one at each end). It is invisible; with the link tool it covers the frame,
+   so a link starts and ends anywhere on it. */
+.canvas-wrap .react-flow__handle.link-handle {
+  top: 50%;
+  left: 50%;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+.canvas-wrap .frame.linking > .react-flow__handle.link-handle {
+  inset: 0;
+  width: auto;
+  height: auto;
+  transform: none;
+  border-radius: inherit;
+  opacity: 1;
+  z-index: 10;
+  pointer-events: all;
+  cursor: crosshair;
+}
+.canvas-wrap .frame.linking > .react-flow__handle.link-handle:hover,
+.canvas-wrap .frame.linking > .react-flow__handle.link-handle.connectingfrom,
+.canvas-wrap .frame.linking > .react-flow__handle.link-handle.connectingto.valid {
+  box-shadow: inset 0 0 0 calc(2px / var(--z, 1)) var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.canvas-wrap.link-mode .react-flow__pane {
+  cursor: grab;
+}
+/* The line keeps its width on screen at any zoom. */
+.react-flow__edge-path.link-line {
+  stroke: var(--link);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.react-flow__edge:hover .react-flow__edge-path.link-line,
+.react-flow__edge-path.link-line.selected {
+  stroke: var(--accent);
+}
+
 .flow-wrap {
   width: 100%;
   height: 100%;
@@ -1640,10 +1830,6 @@ body.wb-panning iframe,
   display: flex;
   border-radius: inherit;
   overflow: hidden;
-}
-.canvas-wrap .react-flow__resize-control.line.bottom {
-  border-bottom-width: 3px;
-  border-color: var(--accent);
 }
 .browser {
   flex: 1;
@@ -1926,4 +2112,17 @@ textarea.browser-keys {
 .browser-menu-row.on > button:first-child {
   color: var(--text);
   font-weight: 600;
+}
+.browser-bar button.browser-size {
+  margin-left: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.browser-size-dims {
+  margin-left: 6px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }

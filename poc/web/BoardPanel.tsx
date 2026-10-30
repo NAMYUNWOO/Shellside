@@ -1,11 +1,11 @@
 // One work board: a Figma-like canvas of tool frames, an inspector on the right, the agent's asks floating on top.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, ReactFlowProvider, useReactFlow } from "@xyflow/react";
-import type { Tool } from "../shared/catalog.ts";
+import type { Link, LinkDirection, Tool } from "../shared/catalog.ts";
 import { useApi, ApiError, loginProblem, type AgentStatus } from "./api.ts";
 import { ClaudeMark } from "./TerminalButton.tsx";
 import { AskCard } from "./Asks.tsx";
-import { BoardCanvas, useCanvasActions } from "./Canvas.tsx";
+import { BoardCanvas, useCanvasActions, type CanvasTool } from "./Canvas.tsx";
 import { ContextMenu, type MenuItem } from "./ContextMenu.tsx";
 import { SaveToLibraryDialog, SendToClaudeDialog } from "./Dialogs.tsx";
 import { Inspector } from "./Inspector.tsx";
@@ -63,7 +63,7 @@ type Menu = { x: number; y: number; ids: string[]; at: { x: number; y: number } 
 function BoardView({ boardId, boardName, active, agentStatus, terminalButton, onNotice, onSentToClaude, onOpenTerminal, onRefreshStatus }: BoardPanelProps) {
   const api = useApi();
   const t = useT();
-  const { tools, toolsById, asks, events, library, channels, live, connected, ready } = useBoard(boardId);
+  const { tools, toolsById, asks, events, library, channels, links, live, connected, ready } = useBoard(boardId);
   const now = useNow();
   const cam = useCanvasActions();
   const rf = useReactFlow();
@@ -72,8 +72,11 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   const [libraryOpen, setLibraryOpen] = usePersistent("wb.libraryOpen", false);
   const [inspectorOpen, setInspectorOpen] = usePersistent("wb.inspectorOpen", true);
   const [minimap, setMinimap] = usePersistent("wb.minimap", false);
-  const [tool, setTool] = usePersistent<"select" | "hand">("wb.tool", "select");
+  const [tool, setTool] = usePersistent<CanvasTool>("wb.tool", "select");
   const [menu, setMenu] = useState<Menu | null>(null);
+  const [linkMenu, setLinkMenu] = useState<{ x: number; y: number; linkId: string } | null>(null);
+  const [selectedLinkIds, setSelectedLinkIds] = useState<string[]>([]);
+  const onSelectLinks = useCallback((ids: string[]) => setSelectedLinkIds((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids)), []);
   const [sendIds, setSendIds] = useState<string[] | null>(null);
   const [saveTool, setSaveTool] = useState<Tool | null>(null);
   const [appErrors, setAppErrors] = useState<Record<string, number>>({});
@@ -222,10 +225,14 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         setTool("select");
       } else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "h") {
         setTool("hand");
+      } else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "l") {
+        setTool("link");
       } else if (e.key === "Escape") {
+        if (tool === "link") setTool("select");
         setSelectedIds([]);
-      } else if ((e.key === "Delete" || e.key === "Backspace") && selectedIds.length) {
-        removeTools(selectedIds);
+      } else if ((e.key === "Delete" || e.key === "Backspace") && (selectedIds.length || selectedLinkIds.length)) {
+        for (const id of selectedLinkIds) api.deleteLink(id).catch((err) => onNotice(err.message));
+        if (selectedIds.length) removeTools(selectedIds);
       } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && selectedIds.length) {
         e.preventDefault();
         setSendIds(selectedIds);
@@ -236,7 +243,23 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cam, selectedIds, tools, removeTools, active, setTool]);
+  }, [cam, selectedIds, selectedLinkIds, tools, removeTools, active, setTool, tool, api, onNotice]);
+
+  // Right click on a link: which way it points, or remove it.
+  const linkMenuItems = (l: Link): MenuItem[] => {
+    const a = `@${toolsById[l.from]?.name ?? "?"}`;
+    const b = `@${toolsById[l.to]?.name ?? "?"}`;
+    const set = (input: { direction: LinkDirection; from?: string; to?: string }) => api.updateLink(l.id, input).catch((err) => onNotice(err.message));
+    const mark = (on: boolean, label: string) => `${on ? "✓ " : "\u2003"}${label}`;
+    return [
+      { label: mark(l.direction === "none", t(`No direction  ${a} — ${b}`, `방향 없음  ${a} — ${b}`)), onSelect: () => set({ direction: "none" }) },
+      { label: mark(l.direction === "forward", `${a} → ${b}`), onSelect: () => set({ direction: "forward" }) },
+      { label: mark(false, `${b} → ${a}`), onSelect: () => set({ direction: "forward", from: l.to, to: l.from }) },
+      { label: mark(l.direction === "both", t(`Both ways  ${a} ↔ ${b}`, `양방향  ${a} ↔ ${b}`)), onSelect: () => set({ direction: "both" }) },
+      { separator: true },
+      { label: t("Delete link", "연결 삭제"), hint: "⌫", danger: true, onSelect: () => api.deleteLink(l.id).catch((err) => onNotice(err.message)) },
+    ];
+  };
 
   const menuItems = (m: Menu): MenuItem[] => {
     const targets = m.ids.map((id) => toolsById[id]).filter(Boolean) as Tool[];
@@ -275,6 +298,9 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
               },
             },
             { label: t("Save to library…", "라이브러리에 저장…"), onSelect: () => setSaveTool(one) },
+            ...(one.name
+              ? [{ label: t("Copy name", "이름 복사"), hint: `@${one.name}`, onSelect: () => navigator.clipboard?.writeText(`@${one.name}`).then(() => onNotice(t(`Copied @${one.name}`, `@${one.name} 복사됨`))) }]
+              : []),
             { label: t("Copy ID", "ID 복사"), hint: one.id, onSelect: () => navigator.clipboard?.writeText(one.id).then(() => onNotice(t(`Copied ${one.id}`, `${one.id} 복사됨`))) },
           ] as MenuItem[])
         : []),
@@ -335,10 +361,13 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       </header>
 
       <div className="board-main">
-        <div className={`canvas-wrap${minimap ? " minimap-on" : ""}${tool === "hand" ? " hand-mode" : ""}`}>
+        <div className={`canvas-wrap${minimap ? " minimap-on" : ""}${tool === "hand" ? " hand-mode" : ""}${tool === "link" ? " link-mode" : ""}`}>
           <BoardCanvas
             showMinimap={minimap}
             tool={tool}
+            links={links}
+            onSelectLinks={onSelectLinks}
+            onLinkMenu={(pos, linkId) => setLinkMenu({ ...pos, linkId })}
             boardId={boardId}
             tools={tools}
             selectedIds={selectedIds}
@@ -388,6 +417,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
               <CommandBar
                 tool={tool}
                 onTool={setTool}
+                tools={tools}
                 selected={selected}
                 onAdd={(k) => addTool(k)}
                 onSend={async (prompt) => {
@@ -442,6 +472,15 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
           title={menu.ids.length > 1 ? t(`${menu.ids.length} selected`, `${menu.ids.length}개 선택`) : menu.ids.length === 1 ? toolsById[menu.ids[0]]?.title : undefined}
           items={menuItems(menu)}
           onClose={() => setMenu(null)}
+        />
+      )}
+      {linkMenu && links.some((l) => l.id === linkMenu.linkId) && (
+        <ContextMenu
+          x={linkMenu.x}
+          y={linkMenu.y}
+          title={t("Link", "연결")}
+          items={linkMenuItems(links.find((l) => l.id === linkMenu.linkId)!)}
+          onClose={() => setLinkMenu(null)}
         />
       )}
       {sendIds && (
@@ -543,13 +582,15 @@ const panHelp = (t: T) =>
 function CommandBar({
   tool,
   onTool,
+  tools,
   selected,
   onAdd,
   onSend,
   onNotice,
 }: {
-  tool: "select" | "hand";
-  onTool: (t: "select" | "hand") => void;
+  tool: CanvasTool;
+  onTool: (t: CanvasTool) => void;
+  tools: Tool[];
   selected: Tool[];
   onAdd: (k: "note" | "checklist" | "browser") => void;
   onSend: (prompt: string) => Promise<void>;
@@ -559,6 +600,34 @@ function CommandBar({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const clean = text.trim();
+  const inputRef = useRef<HTMLInputElement>(null);
+  // "@na…" before the caret: offer the tools whose name fits, and put the chosen name in.
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [pick, setPick] = useState(0);
+  const matches = mention
+    ? tools
+        .filter((tl) => tl.name && (tl.name.toLowerCase().startsWith(mention.query) || tl.title.toLowerCase().includes(mention.query)))
+        .sort((a, b) => Number(!a.name!.toLowerCase().startsWith(mention.query)) - Number(!b.name!.toLowerCase().startsWith(mention.query)))
+        .slice(0, 6)
+    : [];
+  const findMention = (value: string, caret: number) => {
+    const m = /(^|\s)@([\p{L}\p{N}_.-]*)$/u.exec(value.slice(0, caret));
+    setMention(m ? { start: caret - m[2].length - 1, query: m[2].toLowerCase() } : null);
+    setPick(0);
+  };
+  const insert = (tl: Tool) => {
+    if (!mention) return;
+    const el = inputRef.current;
+    const caret = el?.selectionStart ?? text.length;
+    const word = `@${tl.name} `;
+    const next = text.slice(0, mention.start) + word + text.slice(caret).replace(/^\S*\s?/, "");
+    setText(next);
+    setMention(null);
+    window.requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(mention.start + word.length, mention.start + word.length);
+    });
+  };
   const send = async () => {
     if (!clean || busy) return;
     setBusy(true);
@@ -601,6 +670,21 @@ function CommandBar({
             />
           </svg>
         </button>
+        <button
+          className={tool === "link" ? "tool on" : "tool"}
+          aria-pressed={tool === "link"}
+          onClick={() => onTool("link")}
+          title={t(
+            "Link (L): drag from one frame to another (or click one, then the other). Right-click a link to set its direction. Claude sees the links.",
+            "연결 (L): 한 프레임에서 다른 프레임으로 끌어 잇습니다 (하나를 누르고 다른 하나를 눌러도 됩니다). 선을 우클릭하면 방향을 정합니다. Claude도 연결을 봅니다.",
+          )}
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+            <circle cx="3.5" cy="12.5" r="1.8" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M5 11l6.5-6.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            <path d="M8.5 3.5h4v4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
       </div>
       <span className="sep" />
       <button className="ghost" onClick={() => onAdd("note")} title={t("Add a note in the middle of the view", "화면 가운데에 메모 추가")}>
@@ -618,17 +702,65 @@ function CommandBar({
           {t(`${selected.length} selected attached`, `선택 ${selected.length}개 포함`)}
         </span>
       )}
-      <input
-        value={text}
-        placeholder={selected.length ? t("What should Claude do with the selection?", "선택한 컴포넌트로 Claude에게 시킬 일") : t("Ask Claude", "Claude에게 말하기")}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            send();
+      <div className="cmd-input">
+        {mention && matches.length > 0 && (
+          <div className="mention-menu" role="listbox" aria-label={t("Tools by name", "이름으로 찾은 컴포넌트")}>
+            {matches.map((tl, i) => (
+              <button
+                key={tl.id}
+                role="option"
+                aria-selected={i === pick}
+                className={i === pick ? "on" : undefined}
+                onMouseDown={(e) => (e.preventDefault(), insert(tl))}
+                onMouseEnter={() => setPick(i)}
+              >
+                <span className="frame-name">@{tl.name}</span>
+                <span className="mention-title">{tl.title}</span>
+                <span className="muted">{tl.kind}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <input
+          ref={inputRef}
+          value={text}
+          placeholder={
+            selected.length
+              ? t("What should Claude do with the selection?", "선택한 컴포넌트로 Claude에게 시킬 일")
+              : t("Ask Claude (@name points at a tool)", "Claude에게 말하기 (@이름으로 컴포넌트 지정)")
           }
-        }}
-      />
+          onChange={(e) => {
+            setText(e.target.value);
+            findMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+          }}
+          onSelect={(e) => findMention(e.currentTarget.value, e.currentTarget.selectionStart ?? 0)}
+          onBlur={() => setMention(null)}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
+            if (mention && matches.length) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setPick((p) => (p + (e.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                insert(matches[Math.min(pick, matches.length - 1)]);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+            }
+            if (e.key === "Enter") {
+              e.preventDefault();
+              send();
+            }
+          }}
+        />
+      </div>
       <button className="primary" disabled={!clean || busy} onClick={send}>
         {t("Send ↵", "보내기 ↵")}
       </button>
