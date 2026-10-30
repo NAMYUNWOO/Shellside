@@ -633,10 +633,12 @@ server.listen(PORT, HOST, () => {
   console.log(PROD ? `[workboard] open    ${SERVER_URL}` : `[workboard] open    http://127.0.0.1:5173  (vite)`);
 });
 
+let stopping = false;
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
+    if (stopping) process.exit(0); // asked twice: do not wait
+    stopping = true;
     boards.disposeAll();
-    browsers.dispose();
-    process.exit(0);
+    void browsers.dispose().finally(() => process.exit(0));
   });
 }

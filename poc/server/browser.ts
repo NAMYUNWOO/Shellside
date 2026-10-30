@@ -18,6 +18,8 @@ const MAC = process.platform === "darwin";
 const OPEN = 1; // WebSocket.OPEN
 const DEBUG = !!process.env.WB_DEBUG_BROWSER; // log the person's input and what became of it
 const INPUT_TIMEOUT_MS = 5000; // one stuck input command must not block everything typed after it
+const MAX_INFLIGHT = 2; // frames on their way to one view before it says it drew one
+const ACK_STALE_MS = 1500; // a view that acknowledges nothing this long (an old page?) is not waited for
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const errText = (err: unknown) => (err instanceof Error ? err.message : String(err));
@@ -63,6 +65,17 @@ interface Viewport {
   w: number;
   h: number;
   dsf: number;
+}
+
+/**
+ * One board view's frame stream. A view acknowledges each frame once it has drawn (or dropped) it; at most
+ * MAX_INFLIGHT are on their way, and the newest frame waits for room. Pictures never pile up behind a slow view.
+ */
+interface View {
+  paused: boolean; // off screen: no frames
+  inflight: number;
+  next: Buffer | null;
+  sentAt: number;
 }
 
 /** The frame's layout → the page viewport, before any board view has measured it. */
@@ -149,8 +162,10 @@ export class BrowserTool {
   tabs: Tab[] = [];
   active = 0;
   readonly viewers = new Set<WebSocket>();
-  /** Views that are off screen right now: they stay connected but get no frames. */
-  private paused = new Set<WebSocket>();
+  private views = new Map<WebSocket, View>();
+  /** Frames Chrome waits on: it sends the next one only after this acknowledgement. */
+  private chromeAcks: (() => void)[] = [];
+  private ackTimer: NodeJS.Timeout | null = null;
   viewport: Viewport;
   lastUsed = Date.now();
   agentBusy = false;
@@ -262,6 +277,7 @@ export class BrowserTool {
     this.active = 0;
     this.casting = null;
     this.lastFrame = null;
+    this.chromeAcks = [];
     this.broadcast(this.viewState());
     if (this.viewers.size && !this.closed) setTimeout(() => this.viewers.size && this.ensureOpen().catch(() => {}), 1500);
   }
@@ -273,6 +289,7 @@ export class BrowserTool {
     this.active = 0;
     this.casting = null;
     this.lastFrame = null;
+    this.chromeAcks = [];
     for (const tab of tabs) {
       tab.off();
       await this.chrome.send("Target.closeTarget", { targetId: tab.targetId }).catch(() => {});
@@ -283,6 +300,8 @@ export class BrowserTool {
     this.closed = true;
     for (const ws of this.viewers) ws.close();
     this.viewers.clear();
+    this.views.clear();
+    if (this.ackTimer) clearTimeout(this.ackTimer);
     await this.closeTabs();
   }
 
@@ -485,6 +504,7 @@ export class BrowserTool {
   // ── viewers (board views) ─────────────────────────────────────────────────
   async addViewer(ws: WebSocket) {
     this.viewers.add(ws);
+    this.views.set(ws, { paused: false, inflight: 0, next: null, sentAt: 0 });
     this.lastUsed = Date.now();
     ws.send(JSON.stringify(this.viewState()));
     try {
@@ -494,29 +514,32 @@ export class BrowserTool {
       return;
     }
     ws.send(JSON.stringify(this.viewState()));
-    if (this.lastFrame) ws.send(this.lastFrame, { binary: true });
+    if (this.lastFrame) this.queueFrame(ws, this.lastFrame);
     await this.updateCast(!this.lastFrame);
   }
 
   /** Views that show the page now (connected and on screen). */
   private get watching() {
-    return this.viewers.size - [...this.paused].filter((ws) => this.viewers.has(ws)).length;
+    let n = 0;
+    for (const v of this.views.values()) if (!v.paused) n++;
+    return n;
   }
 
   private setPaused(ws: WebSocket, paused: boolean) {
-    if (paused === this.paused.has(ws)) return;
-    if (paused) this.paused.add(ws);
-    else {
-      this.paused.delete(ws);
-      if (this.lastFrame && ws.readyState === OPEN) ws.send(this.lastFrame, { binary: true });
-    }
+    const v = this.views.get(ws);
+    if (!v || v.paused === paused) return;
+    v.paused = paused;
+    if (paused) v.next = null;
+    else if (this.lastFrame) this.queueFrame(ws, this.lastFrame);
+    this.releaseChrome();
     void this.updateCast();
   }
 
   removeViewer(ws: WebSocket) {
     this.viewers.delete(ws);
-    this.paused.delete(ws);
+    this.views.delete(ws);
     this.lastUsed = Date.now();
+    this.releaseChrome();
     void this.updateCast();
   }
 
@@ -563,18 +586,72 @@ export class BrowserTool {
     if (shot?.data && this.casting === tab.sessionId) this.onFrame(tab, shot.data, null);
   }
 
-  private onFrame(tab: Tab, data: string, frameSession: number | null) {
-    const ack = () => frameSession !== null && this.send(tab, "Page.screencastFrameAck", { sessionId: frameSession }).catch(() => {});
-    if (tab.sessionId !== this.casting) return void ack();
-    const buf = Buffer.from(data, "base64");
+  /** A picture of the page: from the screencast (data is the decoded JPEG) or a one-off screenshot (base64, no ack). */
+  private onFrame(tab: Tab, data: Buffer | string, frameSession: number | null) {
+    const ack = () => void this.send(tab, "Page.screencastFrameAck", { sessionId: frameSession }).catch(() => {});
+    if (tab.sessionId !== this.casting) return void (frameSession !== null && ack());
+    const buf = typeof data === "string" ? Buffer.from(data, "base64") : data;
     this.lastFrame = buf;
-    let pending = 0;
-    for (const ws of this.viewers) {
-      if (ws.readyState !== OPEN || this.paused.has(ws) || ws.bufferedAmount > 4 * 1024 * 1024) continue; // a slow view skips frames
-      pending++;
-      ws.send(buf, { binary: true }, () => --pending === 0 && ack());
+    for (const ws of this.views.keys()) this.queueFrame(ws, buf);
+    if (frameSession !== null) this.chromeAcks.push(ack);
+    this.releaseChrome();
+  }
+
+  /** The newest picture for one view: sent now if it has room, else it replaces the one waiting. */
+  private queueFrame(ws: WebSocket, buf: Buffer) {
+    const v = this.views.get(ws);
+    if (!v || v.paused) return;
+    v.next = buf;
+    this.pump(ws, v);
+  }
+
+  private pump(ws: WebSocket, v: View) {
+    if (!v.next || ws.readyState !== OPEN) return;
+    if (v.inflight >= MAX_INFLIGHT) {
+      if (Date.now() - v.sentAt < ACK_STALE_MS) return;
+      v.inflight = 0; // its acknowledgements went missing: start over rather than freeze
     }
-    if (pending === 0) ack();
+    const buf = v.next;
+    v.next = null;
+    v.inflight++;
+    v.sentAt = Date.now();
+    ws.send(buf, { binary: true });
+  }
+
+  /** A view drew (or dropped) a frame: it has room for the next. */
+  private frameDrawn(ws: WebSocket) {
+    const v = this.views.get(ws);
+    if (!v) return;
+    v.inflight = Math.max(0, v.inflight - 1);
+    this.pump(ws, v);
+    this.releaseChrome();
+  }
+
+  /**
+   * Let Chrome make the next frame unless every view already has one waiting: Chrome captures while the views draw,
+   * so frames come as fast as the fastest view draws, and at most one frame per view is ever thrown away.
+   */
+  private releaseChrome() {
+    if (!this.chromeAcks.length) return;
+    let ready = this.watching === 0;
+    for (const [ws, v] of this.views) if (!v.paused && ws.readyState === OPEN && !v.next) ready = true;
+    if (ready) {
+      if (this.ackTimer) clearTimeout(this.ackTimer);
+      this.ackTimer = null;
+      for (const ack of this.chromeAcks.splice(0)) ack();
+      return;
+    }
+    // Every view is behind. One that never answers (an old page, a stuck tab) must not freeze the others.
+    this.ackTimer ??= setTimeout(() => {
+      this.ackTimer = null;
+      for (const [ws, v] of this.views) {
+        if (v.inflight >= MAX_INFLIGHT && Date.now() - v.sentAt >= ACK_STALE_MS) {
+          v.inflight = 0;
+          this.pump(ws, v);
+        }
+      }
+      this.releaseChrome();
+    }, ACK_STALE_MS);
   }
 
   // ── the person's input from a board view ──────────────────────────────────
@@ -595,6 +672,7 @@ export class BrowserTool {
   }
 
   handleViewerMessage(ws: WebSocket, msg: any) {
+    if (msg?.t === "ack") return this.frameDrawn(ws); // not activity: the view only watches
     if (DEBUG && msg?.t !== "mouse") console.log(`[browser] ${this.toolId} ← ${JSON.stringify(msg).slice(0, 160)}`);
     else if (DEBUG && msg.type !== "move") console.log(`[browser] ${this.toolId} ← mouse ${msg.type} ${msg.x},${msg.y}`);
     this.lastUsed = Date.now();
@@ -1558,8 +1636,9 @@ export class BrowserService {
     }
   }
 
+  /** Server shutdown: Chrome quits before the server does, so a quick restart finds its profile free. */
   dispose() {
-    this.chrome.kill();
+    return this.chrome.stop();
   }
 }
 

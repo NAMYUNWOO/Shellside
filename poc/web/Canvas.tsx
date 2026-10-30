@@ -130,7 +130,8 @@ export function BoardCanvas(props: BoardCanvasProps) {
   }, []);
 
   // The wheel zooms (React Flow, everywhere incl. over frames). Shift+wheel pans instead.
-  // Scrollable parts inside a frame are marked .nowheel and keep their own scrolling.
+  // Scrollable parts inside a frame are marked .nowheel and keep their own scrolling. A browser page takes a scroll
+  // that starts over it before this runs (see routeWheel in BrowserView).
   const wrapRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = wrapRef.current;
@@ -260,10 +261,10 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
         {errors > 0 && <span className="pill error">{t(`${errors} error${errors > 1 ? "s" : ""}`, `오류 ${errors}`)}</span>}
       </div>
       <div className="frame-body">
-        <ToolBody tool={tool} selected={!!selected} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
+        <ToolBody tool={tool} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
         {tool.kind === "app" && !selected && (
           // First click selects the app; only then does its iframe get the pointer, so scroll/drag keep panning the canvas.
-          // (A browser needs no shield: its first click already reaches the page, and its wheel zooms the board until selected.)
+          // (A browser needs no shield: clicks reach the page at once, and a scroll that starts on the board keeps zooming it.)
           <div className="frame-shield" title={t("Click to use the app", "클릭해서 앱 사용")} />
         )}
       </div>

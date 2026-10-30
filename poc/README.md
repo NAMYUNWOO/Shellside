@@ -21,7 +21,7 @@ Open <http://127.0.0.1:5173>. The server listens only on `127.0.0.1:4100`.
 | Area | What it does |
 | --- | --- |
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
-| Center: **Canvas** | Tools sit on it as frames. Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Wheel / pinch = zoom, Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width |
+| Center: **Canvas** | Tools sit on it as frames. Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Wheel / pinch = zoom (a scroll that starts over a browser page scrolls the page), Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width |
 | **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here / + Browser here |
 | Right: **Inspector** | One selected: properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Claude mark inside the button when signed in to Claude, and `!` when a permission prompt is waiting |
@@ -101,7 +101,11 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
   Chrome and lives in `data/browser/profile`. Tabs nobody has used for 10 minutes close (the address is kept), and
   Chrome quits when no tab is left.
 - **You.** The frame shows the page live (screencast frames over `/ws/browser`, rendered at 2× so text stays sharp on
-  high-density screens). Clicks, scrolling, keys, paste and IME input (Korean, Japanese…) go to the page; IME composition happens in the page itself, as in a normal browser. Headless Chrome draws
+  high-density screens). A view acknowledges each frame it draws and gets the next only then, so a slow screen skips
+  frames instead of falling behind. Clicks, scrolling, keys, paste and IME input (Korean, Japanese…) go to the page; IME
+  composition happens in the page itself, as in a normal browser. A scroll that starts over the page scrolls it (as far
+  as your fingers move, at any board zoom) until the gesture ends, even if the pointer slides off; one that starts on
+  the board keeps zooming the board as it passes over a page; a pinch always zooms the board. Headless Chrome draws
   no dropdowns or dialogs, so the board draws them: `<select>` lists, `alert/confirm/prompt`, file pickers (files go
   through the board's upload). Links that open new windows become tabs. Resize the frame from its right or bottom edge.
 - **Claude.** `browser_snapshot` turns the page into compact text where everything actionable gets a ref:
