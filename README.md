@@ -13,10 +13,10 @@ reads what you change, reports progress as it works, and stops to ask you before
 
 ## Demo: one request, a live browser, two linked apps
 
-https://github.com/user-attachments/assets/2aeefd23-2b63-41ff-adac-d546228b2796
+https://github.com/user-attachments/assets/8c902a8f-110f-4ec2-8854-9f7a5fcc2a1e
 
 <sub>Claude Code in the board's terminal opens a page in the board browser, creates a table app and a chart app for the
-request, and links them. 68 s; long waits are sped up. Also in the repo: [docs/media/shellside-demo.mp4](docs/media/shellside-demo.mp4).</sub>
+request, and links them. 37 s; long waits are sped up. Also in the repo: [docs/media/shellside-demo.mp4](docs/media/shellside-demo.mp4).</sub>
 
 1. **The board's own terminal.** Every board has a terminal, a real shell rendered with [wterm](https://github.com/vercel-labs/wterm).
    **Start Claude Code** starts Claude Code in it, already connected to this board through the board's MCP server.
