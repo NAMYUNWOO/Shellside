@@ -146,6 +146,10 @@ Shellside runs a real shell for every board, so treat it like one.
 
 - The server listens only on `127.0.0.1`. It checks `Host` and `Origin`, and refuses requests the browser marks as
   cross-site, so other websites and DNS rebinding can't reach it. **Don't expose the port** (no port forwarding, no tunnels).
+- Only a browser paired with the server counts as you. The first browser that opens a new server is paired
+  automatically; any other browser types a one-time code that the server prints in its own console. Everything else
+  that reaches the server, including Claude in a board's terminal (curl, scripts, the `wb` CLI), acts as the agent at
+  most: it can't answer Claude's asks, type into a terminal or send requests as you.
 - Each board's terminal runs with your user's permissions, and so does Claude inside it. There is no container
   isolation yet; only run agents you trust.
 - Apps run in sandboxed iframes (opaque origin, CSP with no network) and talk to the board only through `postMessage`.

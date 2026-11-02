@@ -147,7 +147,8 @@ npm run dev                        # in one terminal
 node examples/seed-demo.mjs        # in another: adds four demo boards (Release v2.3, Sales analysis, DB migration, Backfill)
 ```
 
-The script calls the same HTTP API the `wb` CLI uses, acting the way Claude does from a board terminal. The apps in
+The script calls the same HTTP API the `wb` CLI uses, acting the way Claude does from a board terminal. Adding boards
+is the person's job, so it first asks for the pairing code the server prints in its console. The apps in
 [`examples/apps/`](examples/apps) show channels in practice: `sales-data.jsx` writes the `sales` channel, and
 `scatter-plot.jsx` and `region-summary.jsx` read it; clicking a row or a point writes `selection`, which all three highlight.
 
@@ -212,6 +213,7 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 ## Security notes
 
 - The server binds only to `127.0.0.1` and checks the `Host` and `Origin` headers, and refuses requests the browser marks as cross-site (`Sec-Fetch-Site`), so other websites and DNS rebinding can't reach it.
+- Only a browser paired with the server counts as the person. The first browser that opens a server nobody has paired with is paired automatically (no agent can run before that: Claude starts from a board's terminal, and only a paired browser can open one). Any other browser types a one-time 8-digit code that the server prints in its own console (valid 10 minutes, five tries). Paired browsers keep an `HttpOnly`, `SameSite=Strict` cookie; the server keeps only its SHA-256 in `data/browser-sessions.json`. Every other request is the agent at most: it must say so (`x-wb-actor: agent`, as the `wb` CLI does) or it's refused, so Claude can't approve its own asks, connect to a terminal socket to answer its own permission prompts, or send messages as you. To unpair every browser, empty that file's `sessions` list and restart the server. Anyone who can read the server's console output can pair a browser, so run the server in your own terminal rather than writing its output to a file.
 - Each board's terminal is a real shell with your user's permissions, and Claude runs in it. There is no container isolation yet. Don't expose the port (no port forwarding, no tunnels), and only run agents you trust.
 - App code runs in a sandboxed iframe (opaque origin, a CSP that allows no network access) and talks to the board only through `postMessage`.
 - When app code writes to other tools, those writes count as the agent's writes, so read-only settings and human approval gates still apply.
