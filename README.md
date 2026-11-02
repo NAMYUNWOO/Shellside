@@ -158,7 +158,9 @@ Shellside runs a real shell for every board, so treat it like one.
   isolation yet; only run agents you trust.
 - Apps run in sandboxed iframes (opaque origin, CSP with no network) and talk to the board only through `postMessage`.
 - The board browser is a separate headless Chrome reached through a pipe (no debugging port). Whatever you sign in to
-  there, Claude can use while it drives the browser; take over when you type secrets.
+  there, Claude can use while it drives the browser; take over when you type secrets. Claude can't go past Chrome's
+  certificate warnings. On a network that inspects HTTPS, see
+  [Networks that inspect HTTPS](poc/README.md#networks-that-inspect-https).
 - `poc/data/` and `poc/workspaces/` hold your boards, uploaded files and session files. They are git-ignored; never commit them.
 
 ## Repository layout

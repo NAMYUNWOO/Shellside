@@ -12,6 +12,7 @@ import { Library } from "./library.ts";
 import { BoardRegistry, type BoardRuntime } from "./boards.ts";
 import { BrowserService } from "./browser.ts";
 import { findChrome, noChromeMessage } from "./cdp.ts";
+import { startupNotes } from "./certs.ts";
 import { HumanSessions } from "./auth.ts";
 import { CATALOG_DOC, type Actor } from "../shared/catalog.ts";
 
@@ -751,6 +752,11 @@ server.listen(PORT, HOST, () => {
   console.log(PROD ? `[workboard] open    ${SERVER_URL}` : `[workboard] open    http://127.0.0.1:5173  (vite)`);
   // Say it now rather than when someone first adds a browser frame.
   if (!findChrome()) console.log(`[workboard] browser ${noChromeMessage()}`);
+  try {
+    for (const note of startupNotes()) console.log(`[workboard] browser ${note}`);
+  } catch (err) {
+    console.log(`[workboard] browser could not check certificates: ${(err as Error).message}`);
+  }
 });
 
 let stopping = false;

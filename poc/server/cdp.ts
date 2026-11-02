@@ -3,8 +3,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { BoardError } from "./board.ts";
+import { browserEnv } from "./certs.ts";
 
 type EventFn = (method: string, params: any) => void;
 
@@ -147,6 +148,8 @@ export class Chrome {
   private async launch() {
     const exe = findChrome();
     if (!exe) throw new BoardError(noChromeMessage(), 503);
+    // WB_BROWSER_CA: its own certificate database (certs.ts). Without it, Chrome runs with the server's environment.
+    const env = browserEnv(dirname(this.profileDir));
     mkdirSync(this.profileDir, { recursive: true });
     const lang = Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
     const args = [
@@ -174,26 +177,33 @@ export class Chrome {
     // A Chrome that is still shutting down (the server just restarted) holds the profile for a moment, and a new one
     // started on it quits at once: try again shortly.
     for (let attempt = 1; ; attempt++) {
-      const r = await this.start(exe, args);
+      const r = await this.start(exe, args, env);
       if (r === true) return;
       if (!r.quit || attempt === 3) {
         // A Linux Chromium from Playwright needs system libraries that a minimal install (WSL, containers) may lack.
-        const libs = /error while loading shared libraries/.test(r.message) ? ` Install the libraries it needs with "npx playwright install-deps chromium".` : "";
-        throw new BoardError(`could not start the board browser (${exe}): ${r.message}${libs}`, 503);
+        const hint = /error while loading shared libraries/.test(r.message)
+          ? ` Install the libraries it needs with "npx playwright install-deps chromium".`
+          : /as root without --no-sandbox|zygote/i.test(r.message) && process.getuid?.() === 0
+            ? " Chrome doesn't run as root with its sandbox on: start the server as a normal user."
+            : "";
+        throw new BoardError(`could not start the board browser (${exe}): ${r.message}${hint}`, 503);
       }
       await sleep(1000 * attempt);
     }
   }
 
   /** One try at starting Chrome: true, or why not (quit: it exited by itself rather than hanging). */
-  private async start(exe: string, args: string[]): Promise<true | { quit: boolean; message: string }> {
-    const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
+  private async start(exe: string, args: string[], env?: NodeJS.ProcessEnv): Promise<true | { quit: boolean; message: string }> {
+    const proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"], env });
     this.proc = proc;
     this.parts = [];
     let stderr = "";
     proc.stderr!.on("data", (d) => (stderr = (stderr + d).slice(-2000)));
     const out = proc.stdio[4] as NodeJS.ReadableStream;
     out.on("data", (chunk: Buffer) => this.onData(chunk));
+    // On Linux these pipes are socket pairs, and a Chrome that dies or fails to start resets them (ECONNRESET, EPIPE).
+    // The exit handler below cleans up; unhandled, the error would take the whole server down.
+    for (const s of [proc.stdio[3], proc.stdio[4], proc.stderr]) (s as NodeJS.EventEmitter | null)?.on("error", () => {});
     proc.on("exit", () => {
       if (this.proc !== proc) return;
       this.proc = null;
