@@ -148,7 +148,40 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
 - **Apps.** An app can read a browser like any tool (`useTool(id).state` → `url`, `title`) and open an address with
   `board.writeTool(id, [{ op: "replace", path: "/url", value }])`.
 - CLI: `wb br open|snap|act|click|fill|press|select|eval|shot|net|body|handoff` (`wb help`).
-- Settings: `WB_CHROME` (which browser), `WB_BROWSER_SCALE` (pixel density, default 2), `WB_DEBUG_BROWSER=1` (log the person's input on the server).
+- **Certificate errors.** When Chrome refuses a site's certificate, the server fetches the certificate itself (through
+  `https_proxy` when set, as Chrome on Linux does) and says who issued it and who trusts that issuer, in the frame and to
+  Claude, instead of a bare `net::ERR_CERT_AUTHORITY_INVALID`. Chrome's warning page stays: you can read it and decide,
+  but Claude's steps that act inside it (click, type, press, eval…) are refused, so Claude can't go past it. It can only
+  open another address or tell you.
+- Settings: `WB_CHROME` (which browser), `WB_BROWSER_CA` (extra root CAs for the board browser, Linux; see below), `WB_BROWSER_SCALE` (pixel density, default 2), `WB_DEBUG_BROWSER=1` (log the person's input on the server).
+
+### Networks that inspect HTTPS
+
+Some networks (often at work) inspect HTTPS: a proxy re-signs sites with the organization's own root CA. The operating
+system usually trusts that CA, so curl, Node, git and your own browser work, but the board browser fails on those sites
+with `net::ERR_CERT_AUTHORITY_INVALID`, while sites the proxy leaves alone (often github.com) open fine. The error in
+the frame says so when it finds the issuer in your system's store.
+
+- **macOS and Windows:** Chrome uses the system's certificate store. If the CA is in the keychain (or the Windows
+  store), the board browser trusts it too; if not, ask your IT team to install it there.
+- **Linux and WSL:** Chrome doesn't read `/etc/ssl/certs` for added CAs; it reads the NSS database `~/.pki/nssdb`, which
+  every Chrome and Chromium of your Linux user shares. To trust the CA in the **board browser only**, start the server with
+  its file:
+
+  ```bash
+  WB_BROWSER_CA=/usr/local/share/ca-certificates/<org-ca>.crt npm run dev
+  ```
+
+  `WB_BROWSER_CA` takes PEM files or folders of them, separated by `:`. The server then runs Chrome with its own NSS
+  database (`data/browser/home/.pki/nssdb`, rebuilt when the list changes) holding exactly those CAs, and `HOME` pointing
+  there; your fonts and settings stay the same. It needs `certutil`: `sudo apt install libnss3-tools`, or without sudo
+  `apt download libnss3-tools && dpkg -x libnss3-tools_*.deb ./nss` and put `./nss/usr/bin` on `PATH`. The server lists
+  the extra CAs it trusts when it starts, and warns when CAs added to the system (`/usr/local/share/ca-certificates`,
+  `NODE_EXTRA_CA_CERTS`) are missing from the board browser, or expire within 30 days.
+- To check that a CA is the one re-signing a site: `openssl s_client -connect <site>:443 -servername <site> -CAfile <org-ca>.crt </dev/null | grep 'Verify return code'` (expect `0 (ok)`).
+
+The board browser never weakens TLS: no `--ignore-certificate-errors`, an expired certificate or a wrong name is still
+refused with a trusted CA, and trusting a CA stays your action.
 
 ## Examples
 
@@ -232,4 +265,5 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 - The board UI refuses to be framed by other sites (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), so no page can overlay it to trick a click onto an approval or into the terminal.
 - The board browser's Chrome is reached only through a pipe (no debugging port). It opens only `http(s)`, `file` and `about:blank` addresses. Its profile (`data/browser/profile`) holds whatever you sign in to there, readable by your user account, and Claude can use those sessions while it drives the browser: sign in only where you'd let Claude act. Take over when you type secrets; Claude can't read or act until you hand it back.
 - Web page text reaches Claude as data, marked as such in every snapshot; the board rules tell it never to follow instructions found on a page.
+- Claude can't go past Chrome's certificate (or other) warning pages: its in-page steps are refused there. Extra root CAs reach the board browser only through `WB_BROWSER_CA`, which you set; TLS checks are never turned off.
 - `data/` and `workspaces/` hold your boards, uploads, downloads, browser profile and session files. They are git-ignored; never commit them.
