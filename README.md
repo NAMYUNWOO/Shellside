@@ -87,7 +87,9 @@ input included); Claude reads the same page as text with refs (`[@5 textbox "Ema
 it with batched steps (`browser_act`: fill, click, wait…, then a fresh snapshot), like
 [ego-lite](https://github.com/citrolabs/ego-lite)'s browser for agents. You see a marker on everything Claude clicks.
 **Take over** whenever you want (Claude waits until you hand it back), and Claude hands the browser to you for sign-ins,
-CAPTCHAs and payments (`browser_handoff`). Downloads land in the board's folder. Details: [poc/README.md](poc/README.md#board-browser).
+CAPTCHAs and payments (`browser_handoff`). Claude can also read what a page loaded (`browser_network`): the JSON a site
+fetches from its own API (listings, prices, search results) comes back exact instead of read off the screen, with
+headers and secret-looking values left out. Downloads land in the board's folder. Details: [poc/README.md](poc/README.md#board-browser).
 
 ### The agent's side: MCP and the `wb` CLI
 

@@ -464,6 +464,30 @@ const boardRoutes: BoardRoute[] = [
     },
   ],
   [
+    "GET",
+    /^\/browser\/([\w-]+)\/network$/,
+    ({ rt, params, url, actor }) => {
+      const p = url.searchParams;
+      return browserOf(rt, params[0]).network(actor, {
+        url: p.get("url") ?? undefined,
+        type: p.get("type") ?? undefined,
+        json: p.get("json") === "1",
+        since: p.get("since") ?? undefined,
+        limit: Number(p.get("limit")) || undefined,
+      });
+    },
+  ],
+  [
+    "GET",
+    /^\/browser\/([\w-]+)\/network\/(n?\d+)$/,
+    ({ rt, params, url, actor }) => browserOf(rt, params[0]).networkBody(actor, params[1], { maxChars: Number(url.searchParams.get("max")) || undefined }),
+  ],
+  [
+    "POST",
+    /^\/browser\/([\w-]+)\/network\/(n?\d+)\/save$/,
+    ({ rt, params, body, actor }) => browserOf(rt, params[0]).networkBody(actor, params[1], { saveTo: String(body?.path ?? "") }),
+  ],
+  [
     "POST",
     /^\/browser\/([\w-]+)\/handoff$/,
     async ({ rt, params, body, actor, res }) => {

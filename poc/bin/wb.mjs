@@ -42,6 +42,9 @@ const HELP = `wb — WorkBoard from the terminal (acts as the agent)
   wb br goto|click|fill|press|select [id] <args…>   one step: click @3 · fill @5 "text" · press Enter · select @7 Korea
   wb br eval [id] '<js>'                  run page JavaScript, print the value
   wb br shot [id] [file.png] [--full]     save a screenshot
+  wb br net [id] [--url text] [--type xhr|fetch|document|other] [--json] [--since nN] [--limit n]
+                                          what the pages loaded (data requests and their responses)
+  wb br body [id] <nN> [--save name.json] [--max n]   one response; --save writes it to the workspace's network/ folder
   wb br handoff [id] <message>            let the person do a step (sign in…) and wait until they hand it back
 
 Exit codes: 0 ok, 1 error, 2 rejected by the person, 3 still pending (timeout).`;
@@ -254,13 +257,22 @@ switch (cmd) {
       const { writeFileSync } = await import("node:fs");
       writeFileSync(file, Buffer.from(await res.arrayBuffer()));
       console.log(file);
+    } else if (sub === "net" || sub === "network") {
+      const q = new URLSearchParams();
+      for (const k of ["url", "type", "since", "limit"]) if (opts[k] !== undefined && opts[k] !== "true") q.set(k, opts[k]);
+      if (opts.json) q.set("json", "1");
+      console.log((await call("GET", `${B}/network?${q}`)).text);
+    } else if (sub === "body") {
+      if (!rest[0]) die("usage: wb br body [id] <nN> [--save name.json] [--max n]");
+      if (opts.save !== undefined) console.log((await call("POST", `${B}/network/${rest[0]}/save`, { path: opts.save === "true" ? "" : opts.save })).text);
+      else console.log((await call("GET", `${B}/network/${rest[0]}${opts.max ? `?max=${opts.max}` : ""}`)).text);
     } else if (sub === "handoff") {
       if (!rest.length) die("usage: wb br handoff [id] <what the person should do>");
       const r = await call("POST", `${B}/handoff`, { message: rest.join(" "), timeout: num(opts.timeout) });
       out(r);
       if (r.status === "pending") process.exit(3);
       if (r.status === "answered" && !r.approved) process.exit(2);
-    } else die("usage: wb br open|snap|act|goto|click|fill|press|select|eval|shot|handoff …  (wb help)");
+    } else die("usage: wb br open|snap|act|goto|click|fill|press|select|eval|shot|net|body|handoff …  (wb help)");
     break;
   }
   case "snapshot":
