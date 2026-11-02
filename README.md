@@ -124,8 +124,10 @@ The full design is in [docs/product-plan.md](docs/product-plan.md). The PoC inte
 
 ## Quick start
 
-Requirements: macOS or Linux, Node.js 22+, [Claude Code](https://claude.com/claude-code) installed and signed in, and
-Google Chrome (or Chromium, Edge, Brave) for the board browser.
+Requirements: macOS or Linux (on Windows, WSL2), Node.js 22+, [Claude Code](https://claude.com/claude-code) installed
+and signed in, and Google Chrome (or Chromium, Edge, Brave) for the board browser. Without one, run
+`npx playwright install chromium`. **On WSL** the board browser must be a Linux browser inside WSL, because the server
+can't drive Windows Chrome from there. `npx playwright install chromium` in WSL installs one, and needs no restart.
 
 ```bash
 cd poc

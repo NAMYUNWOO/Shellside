@@ -106,8 +106,12 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
 `browser_open`). You and Claude use the same tab: you with mouse and keyboard, Claude with text snapshots and batched steps.
 
 - **Engine.** The server starts one headless Chrome on first use (your installed Google Chrome, Chromium, Edge or Brave,
-  or Playwright's Chromium; set `WB_CHROME` to choose). It is driven over the DevTools protocol through a **pipe**, not a
-  port, so no other program or website can connect to it. Its profile (cookies, sign-ins) is separate from your own
+  or Playwright's Chromium from `npx playwright install chromium`; set `WB_CHROME` to choose). It is driven over the
+  DevTools protocol through a **pipe**, not a port, so no other program or website can connect to it. The pipe is also
+  why **WSL** needs a Linux browser inside WSL: WSL doesn't pass the pipe's file descriptors to a Windows `.exe`, so
+  Windows Chrome can't be used. Run `npx playwright install chromium` in WSL. If that Chrome then fails to start for
+  missing libraries, run `npx playwright install-deps chromium`. The server says at start when it finds no browser, and
+  an install needs no restart (**Try again** in the frame). Its profile (cookies, sign-ins) is separate from your own
   Chrome and lives in `data/browser/profile`. Tabs nobody has used for 10 minutes close (the address is kept), and
   Chrome quits when no tab is left. To websites it presents itself as the browser it is (brand, version and platform
   in the user agent and `Sec-CH-UA` headers, a clean language list, your screen's size, and no `navigator.webdriver`
@@ -143,7 +147,7 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
 - **Files.** Downloads go to the board workspace's `downloads/`; Claude can upload only files inside the workspace.
 - **Apps.** An app can read a browser like any tool (`useTool(id).state` → `url`, `title`) and open an address with
   `board.writeTool(id, [{ op: "replace", path: "/url", value }])`.
-- CLI: `wb br open|snap|act|click|fill|press|select|eval|shot|handoff` (`wb help`).
+- CLI: `wb br open|snap|act|click|fill|press|select|eval|shot|net|body|handoff` (`wb help`).
 - Settings: `WB_CHROME` (which browser), `WB_BROWSER_SCALE` (pixel density, default 2), `WB_DEBUG_BROWSER=1` (log the person's input on the server).
 
 ## Examples
