@@ -1,7 +1,7 @@
 // One headless Chrome for the whole server, driven over the Chrome DevTools Protocol (CDP).
 // The connection is a pipe (--remote-debugging-pipe), not a TCP port: no other process or website can reach it.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, join } from "node:path";
 import { BoardError } from "./board.ts";
@@ -14,13 +14,41 @@ type EventFn = (method: string, params: any) => void;
  */
 export const BROWSER_SCALE = Math.max(1, Math.min(3, Number(process.env.WB_BROWSER_SCALE) || 2));
 
+/** What the browser lookup depends on (tests pass their own). */
+export interface ChromeHost {
+  env: NodeJS.ProcessEnv;
+  os: NodeJS.Platform;
+  home: string;
+  /** Linux under WSL (Windows Subsystem for Linux). */
+  wsl: boolean;
+}
+
+let wsl: boolean | undefined;
+function isWsl(): boolean {
+  if (wsl !== undefined) return wsl;
+  if (platform() !== "linux") return (wsl = false);
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return (wsl = true);
+  try {
+    return (wsl = /microsoft/i.test(readFileSync("/proc/sys/kernel/osrelease", "utf8")));
+  } catch {
+    return (wsl = false);
+  }
+}
+
+const thisHost = (): ChromeHost => ({ env: process.env, os: platform(), home: homedir(), wsl: isWsl() });
+
+/**
+ * A Windows program seen from WSL (`/mnt/c/.../chrome.exe`) can't be the board browser: Chrome is driven over a pipe on
+ * file descriptors 3 and 4 (--remote-debugging-pipe), and WSL passes only stdin, stdout and stderr to a Windows .exe.
+ */
+const windowsProgram = (host: ChromeHost, file: string) => host.wsl && /\.exe$/i.test(file);
+
 /** Where to find a Chromium-based browser. WB_CHROME wins; then the usual install places; then Playwright's copy. */
-export function findChrome(): string | null {
-  const env = process.env.WB_CHROME;
-  if (env) return existsSync(env) ? env : null;
-  const home = homedir();
+export function findChrome(host = thisHost()): string | null {
+  const { env, os, home } = host;
+  if (env.WB_CHROME) return existsSync(env.WB_CHROME) && !windowsProgram(host, env.WB_CHROME) ? env.WB_CHROME : null;
   const candidates: string[] = [];
-  if (platform() === "darwin") {
+  if (os === "darwin") {
     for (const base of ["/Applications", join(home, "Applications")]) {
       candidates.push(
         `${base}/Google Chrome.app/Contents/MacOS/Google Chrome`,
@@ -29,26 +57,63 @@ export function findChrome(): string | null {
         `${base}/Brave Browser.app/Contents/MacOS/Brave Browser`,
       );
     }
-  } else if (platform() === "win32") {
-    for (const base of [process.env["PROGRAMFILES"], process.env["PROGRAMFILES(X86)"], process.env.LOCALAPPDATA].filter(Boolean)) {
+  } else if (os === "win32") {
+    for (const base of [env["PROGRAMFILES"], env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter(Boolean)) {
       candidates.push(`${base}\\Google\\Chrome\\Application\\chrome.exe`, `${base}\\Microsoft\\Edge\\Application\\msedge.exe`);
     }
   } else {
-    for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    for (const dir of (env.PATH ?? "").split(delimiter)) {
+      if (host.wsl && dir.startsWith("/mnt/")) continue; // Windows folders on WSL's PATH: nothing there can be used
       for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"]) candidates.push(join(dir, name));
     }
   }
-  const pw = platform() === "darwin" ? join(home, "Library", "Caches", "ms-playwright") : join(home, ".cache", "ms-playwright");
-  if (existsSync(pw)) {
-    for (const dir of readdirSync(pw).filter((d) => /^chromium-\d+$/.test(d)).sort().reverse()) {
-      candidates.push(
-        join(pw, dir, "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
-        join(pw, dir, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
-        join(pw, dir, "chrome-linux", "chrome"),
-      );
-    }
-  }
+  candidates.push(...playwrightChromes(host));
   return candidates.find((c) => existsSync(c)) ?? null;
+}
+
+/**
+ * Playwright's Chromium (`npx playwright install chromium`), newest first. Current releases install Chrome for Testing
+ * (`chrome-linux64/chrome`, `chrome-mac-arm64/Google Chrome for Testing.app`); older ones used Chromium builds.
+ */
+export function playwrightChromes({ env, os, home }: ChromeHost): string[] {
+  const custom = env.PLAYWRIGHT_BROWSERS_PATH;
+  const root =
+    custom && custom !== "0"
+      ? custom
+      : os === "darwin"
+        ? join(home, "Library", "Caches", "ms-playwright")
+        : os === "win32"
+          ? join(env.LOCALAPPDATA || join(home, "AppData", "Local"), "ms-playwright")
+          : join(env.XDG_CACHE_HOME || join(home, ".cache"), "ms-playwright");
+  let dirs: string[];
+  try {
+    dirs = readdirSync(root).filter((d) => /^chromium-\d+$/.test(d));
+  } catch {
+    return [];
+  }
+  dirs.sort((a, b) => Number(b.slice("chromium-".length)) - Number(a.slice("chromium-".length)));
+  const cft = ["Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"];
+  const chromium = ["Chromium.app", "Contents", "MacOS", "Chromium"];
+  const layouts =
+    os === "darwin"
+      ? [["chrome-mac-arm64", ...cft], ["chrome-mac-x64", ...cft], ["chrome-mac-arm64", ...chromium], ["chrome-mac", ...chromium]]
+      : os === "win32"
+        ? [["chrome-win64", "chrome.exe"], ["chrome-win", "chrome.exe"]]
+        : [["chrome-linux64", "chrome"], ["chrome-linux", "chrome"]];
+  return dirs.flatMap((d) => layouts.map((parts) => join(root, d, ...parts)));
+}
+
+const PLAYWRIGHT_INSTALL = `"npx playwright install chromium"`;
+
+/** Why no board browser was found, and the shortest way to get one on this computer. */
+export function noChromeMessage(host = thisHost()): string {
+  const chosen = host.env.WB_CHROME;
+  if (chosen && windowsProgram(host, chosen))
+    return `WB_CHROME points to a Windows program (${chosen}), which can't be the board browser under WSL. Install a Linux Chromium inside WSL with ${PLAYWRIGHT_INSTALL}, then unset WB_CHROME and restart the server.`;
+  if (chosen) return `WB_CHROME is set to ${chosen}, but there is no file there. Fix or unset it and restart the server.`;
+  if (host.wsl)
+    return `No Linux Chrome or Chromium was found for the board browser. Under WSL, Windows Chrome can't be used: install a Linux Chromium inside WSL with ${PLAYWRIGHT_INSTALL} (no restart needed), or set WB_CHROME to one and restart the server.`;
+  return `No Chrome, Chromium, Edge or Brave was found for the board browser. Install Google Chrome or run ${PLAYWRIGHT_INSTALL} (no restart needed), or set WB_CHROME to a Chromium-based browser's executable and restart the server.`;
 }
 
 export class Chrome {
@@ -81,12 +146,7 @@ export class Chrome {
 
   private async launch() {
     const exe = findChrome();
-    if (!exe) {
-      throw new BoardError(
-        "No Chrome, Chromium, Edge or Brave was found for the board browser. Install Google Chrome, or set WB_CHROME to a Chromium-based browser's executable and restart the server.",
-        503,
-      );
-    }
+    if (!exe) throw new BoardError(noChromeMessage(), 503);
     mkdirSync(this.profileDir, { recursive: true });
     const lang = Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
     const args = [
@@ -116,7 +176,11 @@ export class Chrome {
     for (let attempt = 1; ; attempt++) {
       const r = await this.start(exe, args);
       if (r === true) return;
-      if (!r.quit || attempt === 3) throw new BoardError(`could not start the board browser (${exe}): ${r.message}`, 503);
+      if (!r.quit || attempt === 3) {
+        // A Linux Chromium from Playwright needs system libraries that a minimal install (WSL, containers) may lack.
+        const libs = /error while loading shared libraries/.test(r.message) ? ` Install the libraries it needs with "npx playwright install-deps chromium".` : "";
+        throw new BoardError(`could not start the board browser (${exe}): ${r.message}${libs}`, 503);
+      }
       await sleep(1000 * attempt);
     }
   }
