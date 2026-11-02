@@ -87,7 +87,9 @@ input included); Claude reads the same page as text with refs (`[@5 textbox "Ema
 it with batched steps (`browser_act`: fill, click, wait…, then a fresh snapshot), like
 [ego-lite](https://github.com/citrolabs/ego-lite)'s browser for agents. You see a marker on everything Claude clicks.
 **Take over** whenever you want (Claude waits until you hand it back), and Claude hands the browser to you for sign-ins,
-CAPTCHAs and payments (`browser_handoff`). Downloads land in the board's folder. Details: [poc/README.md](poc/README.md#board-browser).
+CAPTCHAs and payments (`browser_handoff`). Claude can also read what a page loaded (`browser_network`): the JSON a site
+fetches from its own API (listings, prices, search results) comes back exact instead of read off the screen, with
+headers and secret-looking values left out. Downloads land in the board's folder. Details: [poc/README.md](poc/README.md#board-browser).
 
 ### The agent's side: MCP and the `wb` CLI
 
@@ -146,6 +148,10 @@ Shellside runs a real shell for every board, so treat it like one.
 
 - The server listens only on `127.0.0.1`. It checks `Host` and `Origin`, and refuses requests the browser marks as
   cross-site, so other websites and DNS rebinding can't reach it. **Don't expose the port** (no port forwarding, no tunnels).
+- Only a browser paired with the server counts as you. The first browser that opens a new server is paired
+  automatically; any other browser types a one-time code that the server prints in its own console. Everything else
+  that reaches the server, including Claude in a board's terminal (curl, scripts, the `wb` CLI), acts as the agent at
+  most: it can't answer Claude's asks, type into a terminal or send requests as you.
 - Each board's terminal runs with your user's permissions, and so does Claude inside it. There is no container
   isolation yet; only run agents you trust.
 - Apps run in sandboxed iframes (opaque origin, CSP with no network) and talk to the board only through `postMessage`.

@@ -3,18 +3,36 @@
 // It acts the way Claude does from a board terminal (the same HTTP API the `wb` CLI uses):
 //   node examples/seed-demo.mjs              (server at http://127.0.0.1:4100)
 //   WB_URL=http://127.0.0.1:4199 node examples/seed-demo.mjs
-// It only adds new boards; existing boards are left alone.
+// It only adds new boards; existing boards are left alone. Only the person may add boards, so it first asks for a
+// pairing code, which the server prints in its own console (the session ends when the server stops).
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 const BASE = process.env.WB_URL ?? "http://127.0.0.1:4100";
 const APPS = join(dirname(fileURLToPath(import.meta.url)), "apps");
 
+let session = null;
+/** Pair this script for the person's calls: a code from the server console, typed here. */
+async function pair() {
+  const asked = await fetch(BASE + "/api/auth/code", { method: "POST" }).catch((err) => {
+    throw new Error(`cannot reach the server at ${BASE} (${err.message})`);
+  });
+  if (!asked.ok) throw new Error(`pairing code: ${(await asked.json().catch(() => ({}))).error ?? asked.status}`);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const code = await rl.question("Adding boards needs the person. Type the 8-digit code shown in the server's console: ");
+  rl.close();
+  const res = await fetch(BASE + "/api/auth/pair", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code, temporary: true }) });
+  if (!res.ok) throw new Error(`pairing: ${(await res.json().catch(() => ({}))).error ?? res.status}`);
+  session = res.headers.get("set-cookie").split(";")[0];
+}
+
 async function call(method, path, body, actor = "agent") {
+  if (actor === "human" && !session) await pair();
   const res = await fetch(BASE + path, {
     method,
-    headers: { "content-type": "application/json", ...(actor === "agent" ? { "x-wb-actor": "agent" } : {}) },
+    headers: { "content-type": "application/json", ...(actor === "agent" ? { "x-wb-actor": "agent" } : { cookie: session }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));

@@ -23,9 +23,22 @@ async function call<T>(method: string, path: string, body?: unknown, asAgent = f
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
+  // The server no longer knows this browser (its pairing was removed): show the pairing screen again.
+  if (res.status === 401 && data.data?.reason === "pair") window.dispatchEvent(new Event(UNPAIRED_EVENT));
   if (!res.ok) throw new ApiError(data.error ?? `HTTP ${res.status}`, res.status, data.data);
   return data as T;
 }
+
+/** Fired when the server refuses this browser as not paired (see PairGate). */
+export const UNPAIRED_EVENT = "wb:unpaired";
+
+/** Pairing this browser with the server: only a paired browser counts as the person (server/auth.ts). */
+export const authApi = {
+  status: () => call<{ paired: boolean; firstRun: boolean }>("GET", "/api/auth/status"),
+  pairFirst: () => call<{ paired: true }>("POST", "/api/auth/first"),
+  requestCode: () => call<{ expiresAt: number }>("POST", "/api/auth/code"),
+  pair: (code: string) => call<{ paired: true }>("POST", "/api/auth/pair", { code }),
+};
 
 /** none = Claude not running; starting = running but not ready (trust prompt…); permission = waiting for the person. */
 export type AgentState = "none" | "starting" | "idle" | "busy" | "permission";

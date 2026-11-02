@@ -467,6 +467,52 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
   );
 
   server.registerTool(
+    "browser_network",
+    {
+      description:
+        "What the board browser's pages loaded: page loads and the data requests behind them (XHR/fetch, usually JSON from the site's own API: listings, search results, prices, chart data). " +
+        "To collect data from a page, this is exact where a snapshot is approximate: find the request here, then read it with browser_network_body. " +
+        "After a click, scroll or search, pass since (the newest id from the last call) to see only what it loaded. " +
+        "Images, fonts, styles, scripts, headers and anything done while the person had control are not recorded; secret-looking values show as (hidden).",
+      inputSchema: {
+        toolId: browserId,
+        url: z.string().max(500).optional().describe("Only addresses containing this text (e.g. /api/ or a host)"),
+        type: z.enum(["document", "xhr", "fetch", "other"]).optional(),
+        json: z.boolean().optional().describe("Only JSON responses"),
+        since: z.string().max(20).optional().describe('Only requests after this id, e.g. "n42"'),
+        limit: z.number().int().min(1).max(200).optional().describe("How many of the newest matches (default 40)"),
+      },
+    },
+    async ({ toolId, ...filter }) => {
+      try {
+        return replyText(ctx.browsers.pick(toolId).network("agent", filter).text);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+  server.registerTool(
+    "browser_network_body",
+    {
+      description:
+        "Read one response from browser_network by its id, with the request body the page sent (so you can see the query it made). " +
+        "For big or binary responses pass saveTo: the whole response goes to a file in the workspace's network/ folder; process it there (jq, a script) instead of reading it all.",
+      inputSchema: {
+        toolId: browserId,
+        id: z.string().max(20).describe('The id from browser_network, e.g. "n42"'),
+        maxChars: z.number().int().min(1000).max(60000).optional().describe("Default 20000"),
+        saveTo: z.string().max(300).optional().describe('File name in the workspace\'s network/ folder, e.g. "listings-p1.json"'),
+      },
+    },
+    async ({ toolId, id, maxChars, saveTo }) => {
+      try {
+        return replyText((await ctx.browsers.pick(toolId).networkBody("agent", id, { maxChars, saveTo })).text);
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+  server.registerTool(
     "browser_handoff",
     {
       description:

@@ -72,7 +72,7 @@ what is on screen. There is no Edit or Save button.
 `app_create` `app_update` `app_snapshot` `app_invoke` `app_logs`
 `channel_list` `channel_read` `channel_write` `channel_delete`
 `library_list` `library_use` `library_save`
-`browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_handoff`
+`browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_network` `browser_network_body` `browser_handoff`
 `link_create` `link_update` `link_delete`
 
 - Wherever a tool takes a `toolId`, the tool's name works too (`research` or `@research`). `board_list` returns the
@@ -129,6 +129,14 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
   each did plus a fresh snapshot, in the spirit of [ego-lite](https://github.com/citrolabs/ego-lite): fewer round trips
   than one tool call per click. Targets are `@N`, `css:<selector>` or `text:<visible text>`. The snapshot is built by a
   script in an isolated world, so page scripts can't see or tamper with it; password values are never included.
+- **What the page loaded.** `browser_network` lists the page loads and the data requests behind them (XHR/fetch, with
+  status, type and size), and `browser_network_body` reads one response with the request body the page sent. Data a site
+  fetches from its own API (listings, prices, search results) comes back exact instead of read off the screen; big
+  responses go to the workspace's `network/` folder (`saveTo`) for a script to process. Not recorded: images, fonts,
+  styles, scripts, headers (cookies, authorization) and anything while you have taken the browser over. Values under
+  secret-looking keys (`password`, `token`, `apiKey`…) in addresses, request bodies and JSON responses show as
+  `(hidden)`. Bodies stay in server memory within a budget; `saveTo` writes only inside `network/`, never into dot
+  folders such as `.claude/` or instruction files like `CLAUDE.md`.
 - **Taking turns.** **Take over** gives you the browser: Claude's browser calls are refused until you **hand it back**.
   For sign-ins, CAPTCHAs or payments Claude calls `browser_handoff`, which does the same from Claude's side and waits for
   you. While Claude acts, the frame shows a banner and a marker on what it clicks; every batch lands in History.
@@ -147,7 +155,8 @@ npm run dev                        # in one terminal
 node examples/seed-demo.mjs        # in another: adds four demo boards (Release v2.3, Sales analysis, DB migration, Backfill)
 ```
 
-The script calls the same HTTP API the `wb` CLI uses, acting the way Claude does from a board terminal. The apps in
+The script calls the same HTTP API the `wb` CLI uses, acting the way Claude does from a board terminal. Adding boards
+is the person's job, so it first asks for the pairing code the server prints in its console. The apps in
 [`examples/apps/`](examples/apps) show channels in practice: `sales-data.jsx` writes the `sales` channel, and
 `scatter-plot.jsx` and `region-summary.jsx` read it; clicking a row or a point writes `selection`, which all three highlight.
 
@@ -212,6 +221,7 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 ## Security notes
 
 - The server binds only to `127.0.0.1` and checks the `Host` and `Origin` headers, and refuses requests the browser marks as cross-site (`Sec-Fetch-Site`), so other websites and DNS rebinding can't reach it.
+- Only a browser paired with the server counts as the person. The first browser that opens a server nobody has paired with is paired automatically (no agent can run before that: Claude starts from a board's terminal, and only a paired browser can open one). Any other browser types a one-time 8-digit code that the server prints in its own console (valid 10 minutes, five tries). Paired browsers keep an `HttpOnly`, `SameSite=Strict` cookie; the server keeps only its SHA-256 in `data/browser-sessions.json`. Every other request is the agent at most: it must say so (`x-wb-actor: agent`, as the `wb` CLI does) or it's refused, so Claude can't approve its own asks, connect to a terminal socket to answer its own permission prompts, or send messages as you. To unpair every browser, empty that file's `sessions` list and restart the server. Anyone who can read the server's console output can pair a browser, so run the server in your own terminal rather than writing its output to a file.
 - Each board's terminal is a real shell with your user's permissions, and Claude runs in it. There is no container isolation yet. Don't expose the port (no port forwarding, no tunnels), and only run agents you trust.
 - App code runs in a sandboxed iframe (opaque origin, a CSP that allows no network access) and talks to the board only through `postMessage`.
 - When app code writes to other tools, those writes count as the agent's writes, so read-only settings and human approval gates still apply.

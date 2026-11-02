@@ -420,6 +420,12 @@ state: { url, title, control: "shared" | "person", tabs: [{ url, title }], activ
   gone?, timeout), waitUrl, back, forward, reload, eval (page JavaScript; the value comes back), upload (files in the
   workspace), dialog (accept|dismiss, text), newTab, tab (number), closeTab.
 - browser_screenshot → a picture of the page when layout or images matter (text is cheaper: prefer snapshots).
+- browser_network → what the pages loaded: page loads and data requests (XHR/fetch) with status, type and size, newest
+  last. Filter with url, type, json; after an action pass since: "nN" (the newest id you saw) to get only what it loaded.
+- browser_network_body → one response by id, with the request body the page sent. For data (listings, prices, search
+  results) this is exact where a snapshot is approximate. Big ones: saveTo "name.json" writes the whole response into
+  the workspace's network/ folder. Not recorded: images, fonts, styles, scripts, headers, and anything while the person
+  had control; secret-looking values (password, token, apiKey…) show as (hidden).
 - Sign-ins, CAPTCHAs, payments and anything that needs the person's own secrets: call browser_handoff with a message.
   The person does it in the board browser and hands it back. Never ask them to paste passwords into the terminal.
 - control "person" means the person took the browser over: wait (board_wait_event) until they hand it back.

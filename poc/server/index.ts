@@ -11,6 +11,7 @@ import { claudeAuth, composeRequest, isClaude, isShell, requestTools, shellQuote
 import { Library } from "./library.ts";
 import { BoardRegistry, type BoardRuntime } from "./boards.ts";
 import { BrowserService } from "./browser.ts";
+import { HumanSessions } from "./auth.ts";
 import { CATALOG_DOC, type Actor } from "../shared/catalog.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,6 +38,8 @@ const library = new Library(LIBRARY_FILE);
 const HOOK_COMMAND = `"${process.execPath}" "${join(ROOT, "bin", "wb.mjs")}" hook`;
 // One headless Chrome (started on first use) behind every board's browser tools. Its profile lives in data/browser/.
 const browsers = new BrowserService(DATA_DIR);
+// Browsers paired with this server: the only requests that count as the person (see auth.ts).
+const humans = new HumanSessions(join(DATA_DIR, "browser-sessions.json"));
 const boards = new BoardRegistry({ dataDir: DATA_DIR, workspacesDir: WORKSPACES, serverUrl: SERVER_URL, binDir: join(ROOT, "bin"), hookCommand: HOOK_COMMAND, compile: compileApp, browsers });
 
 // ── request guards ───────────────────────────────────────────────────────────
@@ -52,7 +55,9 @@ function allowed(req: IncomingMessage): string | null {
   return null;
 }
 
-const actorOf = (req: IncomingMessage): Actor => (req.headers["x-wb-actor"] === "agent" ? "agent" : "human");
+/** The agent says so (wb CLI, hooks, app writes); the person proves it with a paired browser's session cookie.
+ *  Anything else (a script, Claude's own curl without the agent header) is neither, and is refused. */
+const actorOf = (req: IncomingMessage): Actor | null => (req.headers["x-wb-actor"] === "agent" ? "agent" : humans.isHuman(req) ? "human" : null);
 type Lang = "en" | "ko";
 /** The board UI sends its language; messages meant for the person follow it. Agent-facing text stays English. */
 const langOf = (req: IncomingMessage): Lang => (req.headers["x-wb-lang"] === "ko" ? "ko" : "en");
@@ -153,6 +158,57 @@ interface Ctx {
 type BoardCtx = Ctx & { rt: BoardRuntime };
 type Route = [method: string, re: RegExp, handler: (ctx: Ctx) => unknown];
 type BoardRoute = [method: string, re: RegExp, handler: (ctx: BoardCtx) => unknown];
+type AuthRoute = [method: string, re: RegExp, handler: (ctx: { req: IncomingMessage; res: ServerResponse; body: any; lang: Lang }) => unknown];
+
+const notPaired = (lang: Lang) => ({
+  error: L(
+    lang,
+    "This browser isn't connected to the Shellside server. Scripts and agents: send x-wb-actor: agent, or use the wb CLI.",
+    "이 브라우저는 Shellside 서버에 연결되지 않았습니다. 스크립트나 에이전트라면 x-wb-actor: agent 헤더를 보내거나 wb CLI를 쓰세요.",
+  ),
+  data: { reason: "pair" },
+});
+
+// Pairing a browser with this server (see auth.ts). Open to anyone who passes the Host/Origin checks: they only
+// report the status, pair the very first browser, print a code in the server console, or check a typed code.
+const authRoutes: AuthRoute[] = [
+  ["GET", /^\/api\/auth\/status$/, ({ req }) => ({ paired: humans.isHuman(req), firstRun: humans.firstRun })],
+  [
+    "POST",
+    /^\/api\/auth\/first$/,
+    ({ req, res, lang }) => {
+      const cookie = humans.pairFirst(req);
+      if (!cookie) throw new BoardError(L(lang, "A browser is already connected to this server, so connect with a pairing code.", "이미 연결된 브라우저가 있어 연결 코드로 연결해야 합니다."), 409);
+      res.setHeader("set-cookie", cookie);
+      return { paired: true };
+    },
+  ],
+  [
+    "POST",
+    /^\/api\/auth\/code$/,
+    ({ lang }) => {
+      const r = humans.requestCode();
+      if (!r.ok) {
+        const s = Math.ceil(r.retryInMs / 1000);
+        throw new BoardError(L(lang, `Try again in ${s} s.`, `${s}초 뒤에 다시 시도해 주세요.`), 429);
+      }
+      return { expiresAt: r.expiresAt };
+    },
+  ],
+  [
+    "POST",
+    /^\/api\/auth\/pair$/,
+    ({ req, res, body, lang }) => {
+      const r = humans.confirmCode(String(body?.code ?? ""), req, body?.temporary === true);
+      if (r.ok) {
+        res.setHeader("set-cookie", r.cookie);
+        return { paired: true };
+      }
+      if (r.reason === "wrong_code") throw new BoardError(L(lang, `That code doesn't match. ${r.triesLeft === 1 ? "1 more try" : `${r.triesLeft} more tries`}.`, `코드가 맞지 않습니다. ${r.triesLeft}번 더 시도할 수 있습니다.`), 403);
+      throw new BoardError(L(lang, "No code is active: it expired, was already used, or was cancelled. Show a new code.", "쓸 수 있는 코드가 없습니다. 시간이 지났거나, 이미 썼거나, 취소된 코드입니다. 코드를 다시 띄워 주세요."), 403);
+    },
+  ],
+];
 
 const globalRoutes: Route[] = [
   ["GET", /^\/api\/health$/, () => ({ ok: true, boards: boards.list().length })],
@@ -408,6 +464,30 @@ const boardRoutes: BoardRoute[] = [
     },
   ],
   [
+    "GET",
+    /^\/browser\/([\w-]+)\/network$/,
+    ({ rt, params, url, actor }) => {
+      const p = url.searchParams;
+      return browserOf(rt, params[0]).network(actor, {
+        url: p.get("url") ?? undefined,
+        type: p.get("type") ?? undefined,
+        json: p.get("json") === "1",
+        since: p.get("since") ?? undefined,
+        limit: Number(p.get("limit")) || undefined,
+      });
+    },
+  ],
+  [
+    "GET",
+    /^\/browser\/([\w-]+)\/network\/(n?\d+)$/,
+    ({ rt, params, url, actor }) => browserOf(rt, params[0]).networkBody(actor, params[1], { maxChars: Number(url.searchParams.get("max")) || undefined }),
+  ],
+  [
+    "POST",
+    /^\/browser\/([\w-]+)\/network\/(n?\d+)\/save$/,
+    ({ rt, params, body, actor }) => browserOf(rt, params[0]).networkBody(actor, params[1], { saveTo: String(body?.path ?? "") }),
+  ],
+  [
     "POST",
     /^\/browser\/([\w-]+)\/handoff$/,
     async ({ rt, params, body, actor, res }) => {
@@ -431,8 +511,8 @@ const boardRoutes: BoardRoute[] = [
 
 // ── file uploads from apps: saved into the board's workspace so its agent can read them by path ──
 const MAX_UPLOAD = 25 * 1024 * 1024;
-async function saveUpload(rt: BoardRuntime, req: IncomingMessage, url: URL) {
-  humanOnly(actorOf(req), "uploads");
+async function saveUpload(rt: BoardRuntime, req: IncomingMessage, url: URL, actor: Actor) {
+  humanOnly(actor, "uploads");
   // octet-stream is not a CORS-simple type, so other sites cannot post here without a preflight we never grant.
   if (!(req.headers["content-type"] ?? "").startsWith("application/octet-stream")) throw new BoardError("content-type must be application/octet-stream", 415);
   const tool = rt.board.getTool(url.searchParams.get("toolId") ?? "");
@@ -508,17 +588,24 @@ const server = createServer(async (req, res) => {
       const rt = boards.get(mcp[1]);
       return await handleMcp(rt.board, { workspace: rt.meta.workspace, browserRpc: rt.browserRpc.bind(rt), library, browsers: rt.browsers }, req, res, await readBody(req));
     }
+    if (url.pathname.startsWith("/api/auth/")) {
+      const hit = await dispatch(authRoutes, url.pathname, req, res, (_params, body) => ({ req, res, body, lang: langOf(req) }));
+      if (!hit) send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
+      return;
+    }
+    const actor = actorOf(req);
+    if (url.pathname.startsWith("/api/") && !actor) return send(res, 401, notPaired(langOf(req)));
     const scoped = /^\/api\/b\/([\w-]+)(\/.*)$/.exec(url.pathname);
     if (scoped) {
       const rt = boards.get(scoped[1]);
       const sub = scoped[2];
-      if (sub === "/files" && req.method === "POST") return send(res, 200, await saveUpload(rt, req, url));
-      const hit = await dispatch(boardRoutes, sub, req, res, (params, body) => ({ req, res, params, url, body, actor: actorOf(req), lang: langOf(req), rt }));
+      if (sub === "/files" && req.method === "POST") return send(res, 200, await saveUpload(rt, req, url, actor!));
+      const hit = await dispatch(boardRoutes, sub, req, res, (params, body) => ({ req, res, params, url, body, actor: actor!, lang: langOf(req), rt }));
       if (!hit) send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
       return;
     }
     if (url.pathname.startsWith("/api/")) {
-      const hit = await dispatch(globalRoutes, url.pathname, req, res, (params, body) => ({ req, res, params, url, body, actor: actorOf(req), lang: langOf(req) }));
+      const hit = await dispatch(globalRoutes, url.pathname, req, res, (params, body) => ({ req, res, params, url, body, actor: actor!, lang: langOf(req) }));
       if (!hit) send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
       return;
     }
@@ -540,6 +627,11 @@ server.on("upgrade", (req, socket, head) => {
   // A WebSocket always carries an Origin from browsers; require an allowed one so no website can open these shells.
   if (denied || !req.headers.origin) {
     socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+    return socket.destroy();
+  }
+  // Terminals, the live board and the board browser's controls are the person's: only a paired browser opens them.
+  if (!humans.isHuman(req)) {
+    socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     return socket.destroy();
   }
   const url = new URL(req.url ?? "/", SERVER_URL);

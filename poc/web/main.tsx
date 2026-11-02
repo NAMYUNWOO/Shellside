@@ -7,6 +7,7 @@ import { TerminalButton } from "./TerminalButton.tsx";
 import { TerminalPane } from "./TerminalPane.tsx";
 import { useAgentStatus } from "./useAgentStatus.ts";
 import { LangProvider, useT } from "./i18n.tsx";
+import { PairGate } from "./PairGate.tsx";
 import "./styles.css";
 
 function stored<T>(key: string, fallback: T): T {
@@ -245,6 +246,8 @@ function App() {
 
 createRoot(document.getElementById("root")!).render(
   <LangProvider>
-    <App />
+    <PairGate>
+      <App />
+    </PairGate>
   </LangProvider>,
 );
