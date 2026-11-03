@@ -59,7 +59,9 @@ function redirectOf(url) {
 
 /** The latest release: its version, its page, and the file this kind of install updates from. */
 export async function latestRelease() {
-  const page = await redirectOf(LATEST);
+  const url = new URL(LATEST);
+  url.searchParams.set("t", String(Date.now())); // not an edge cache's answer from before the newest release
+  const page = await redirectOf(url.toString());
   const tag = /\/releases\/tag\/([^/?#]+)$/.exec(new URL(page).pathname)?.[1];
   if (!tag) throw new Error("no release is published yet");
   const version = decodeURIComponent(tag).replace(/^v/, "");

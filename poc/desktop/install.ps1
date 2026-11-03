@@ -32,7 +32,8 @@
   } elseif ($env:SHELLSIDE_VERSION) {
     $version = $env:SHELLSIDE_VERSION
   } else {
-    $request = [System.Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
+    # The query keeps an edge cache from answering with the redirect from before the newest release.
+    $request = [System.Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest?t=$([DateTime]::UtcNow.Ticks)")
     $request.Method = 'HEAD'
     $request.AllowAutoRedirect = $false
     $request.UserAgent = 'Shellside-installer'
