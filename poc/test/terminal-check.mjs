@@ -128,9 +128,10 @@ if (WIN) {
   check("…and itself again when it ends", !!(await until("back", async () => isShellName((await status()).terminal.foreground), 8000)));
 }
 
-// Never start a real Claude: the terminal must find the fake one.
-type(WIN ? "Write-Output (\"WHICH=\" + (Get-Command claude -CommandType Application).Source)\r" : "echo WHICH=$(command -v claude)\r");
-const which = await until("which", () => /WHICH=(\S+)/.exec(out.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split(/\r?\n/).filter((l) => l.startsWith("WHICH=")).join("\n"))?.[1], 10000);
+// Never start a real Claude: the terminal must find the fake one. (`which`, not `command -v`: in bash, `claude` is the
+// board's wrapper function.) The marker is split as typed, so the echoed command line can't match.
+type(WIN ? 'Write-Output ("WH" + "ICH<" + (Get-Command claude -CommandType Application).Source + ">")\r' : 'echo "WH""ICH<$(which claude)>"\r');
+const which = await until("which", () => /WHICH<([^>\r\n]*)>/.exec(out)?.[1], 10000);
 const fakeFound = !!which && which.toLowerCase().startsWith(fakeDir.toLowerCase());
 check("the terminal finds the fake claude", fakeFound, which ?? "nothing");
 if (!fakeFound) await finish("stopping: a request now could start a real Claude");
