@@ -56,7 +56,9 @@ jobs:
       run:
         working-directory: poc/desktop
     env:
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # Windows builds of version tags are signed through SignPath once it is set up (vars.SIGNPATH_ORGANIZATION_ID,
+      # secrets.SIGNPATH_API_TOKEN; see poc/README.md, "Code signing"). Branch builds stay unsigned.
+      SIGN_WINDOWS: ${{ matrix.name == 'Windows' && startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_ORGANIZATION_ID != '' }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -66,15 +68,116 @@ jobs:
           cache-dependency-path: |
             poc/package-lock.json
             poc/desktop/package-lock.json
+      - name: App version
+        shell: bash
+        run: echo "APP_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
       - name: Tag matches the app version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
-        run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+        run: test "v$APP_VERSION" = "$GITHUB_REF_NAME"
       - run: npm ci
         working-directory: poc
       - run: npm ci
       - run: npm run stage
-      - run: npx electron-builder --config electron-builder.yml ${{ matrix.builder }} --publish never
+      # macOS: signed with the Developer ID certificate and notarized when these secrets are set (see
+      # electron-builder.config.cjs); without them, an ad-hoc signature. Only set variables are passed on: electron-builder
+      # takes an empty CSC_LINK for a path.
+      - name: Signing credentials
+        shell: bash
+        env:
+          P12: ${{ secrets.MAC_CERT_P12 }}
+          P12_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          if [ "${{ matrix.name }}" = macOS ] && [ -n "$P12" ]; then
+            printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/DeveloperID.p12"
+            { echo "CSC_LINK=$RUNNER_TEMP/DeveloperID.p12"; echo "CSC_KEY_PASSWORD=$P12_PASSWORD"; } >> "$GITHUB_ENV"
+            if [ -n "$P8" ] && [ -n "$KEY_ID" ] && [ -n "$ISSUER" ]; then
+              printf '%s\n' "$P8" > "$RUNNER_TEMP/AuthKey.p8"
+              { echo "APPLE_API_KEY=$RUNNER_TEMP/AuthKey.p8"; echo "APPLE_API_KEY_ID=$KEY_ID"; echo "APPLE_API_ISSUER=$ISSUER"; } >> "$GITHUB_ENV"
+            fi
+            echo "macOS: Developer ID certificate found"
+          else
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+            echo "no signing certificate: unsigned build"
+          fi
+      - name: Package
+        if: env.SIGN_WINDOWS != 'true'
+        run: npx electron-builder --config electron-builder.config.cjs ${{ matrix.builder }} --publish never
+      # Windows, signed: Shellside.exe first, then the installer built from the signed app. A person approves each
+      # release signing request in SignPath, so these steps wait for it.
+      - name: Package the app (unsigned)
+        if: env.SIGN_WINDOWS == 'true'
+        run: npx electron-builder --config electron-builder.config.cjs --win dir --publish never
+      - name: Upload the app for signing
+        id: unsigned-app
+        if: env.SIGN_WINDOWS == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-app-unsigned
+          path: poc/desktop/release/win-unpacked
+          if-no-files-found: error
+      - name: Sign the app (SignPath)
+        if: env.SIGN_WINDOWS == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'shellside' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: app
+          github-artifact-id: ${{ steps.unsigned-app.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: poc/desktop/release/win-signed
+          parameters: |
+            version: ${{ toJSON(env.APP_VERSION) }}
+      - name: Build the installer from the signed app
+        if: env.SIGN_WINDOWS == 'true'
+        shell: bash
+        run: |
+          rm -rf release/win-unpacked && mv release/win-signed release/win-unpacked
+          npx electron-builder --config electron-builder.config.cjs --win --prepackaged release/win-unpacked --publish never
+      - name: Upload the installer for signing
+        id: unsigned-installer
+        if: env.SIGN_WINDOWS == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-installer-unsigned
+          path: poc/desktop/release/Shellside-Setup-*.exe
+          if-no-files-found: error
+      - name: Sign the installer (SignPath)
+        if: env.SIGN_WINDOWS == 'true'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'shellside' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: poc/desktop/release/installer-signed
+          parameters: |
+            version: ${{ toJSON(env.APP_VERSION) }}
+      - name: Use the signed installer
+        if: env.SIGN_WINDOWS == 'true'
+        shell: bash
+        run: mv -f release/installer-signed/*.exe release/
+      - name: Signatures
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = macOS ]; then
+            codesign -dv --verbose=2 release/mac-arm64/Shellside.app 2>&1 | grep -E "^(Authority|TeamIdentifier|Signature)" || true
+            spctl -a -vv release/mac-arm64/Shellside.app 2>&1 || echo "Gatekeeper: not accepted (no Developer ID signature or not notarized)"
+          else
+            for f in release/win-unpacked/Shellside.exe release/Shellside-Setup-*.exe; do
+              powershell -NoProfile -Command "\$s = Get-AuthenticodeSignature '$f'; '$f: ' + \$s.Status + ' ' + \$s.SignerCertificate.Subject"
+            done
+          fi
       - name: Run the built app once
         shell: bash
         run: |
@@ -110,6 +213,7 @@ jobs:
       - uses: actions/download-artifact@v6
         with:
           path: builds
+          pattern: shellside-* # not the unsigned files that went to SignPath
           merge-multiple: true
       - name: Put the builds on a draft release
         env:

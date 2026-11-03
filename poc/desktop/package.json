@@ -8,7 +8,7 @@
   "scripts": {
     "stage": "node build.mjs",
     "start": "node build.mjs && electron stage",
-    "dist": "node build.mjs && electron-builder --config electron-builder.yml"
+    "dist": "node build.mjs && electron-builder --config electron-builder.config.cjs"
   },
   "devDependencies": {
     "electron": "44.9.3",
