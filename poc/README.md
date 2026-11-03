@@ -47,6 +47,12 @@ server and shows the board in the app's window; quitting stops the server, its t
 asks first when Claude is running). Download it from
 [Releases](https://github.com/NAMYUNWOO/Shellside/releases/latest).
 
+- **Windows, one line:** `irm https://raw.githubusercontent.com/NAMYUNWOO/Shellside/main/poc/desktop/install.ps1 | iex`
+  ([`desktop/install.ps1`](desktop/install.ps1)) downloads the latest release's `.zip`, checks its SHA-256 against
+  the one GitHub lists for the release, unpacks it into `%LOCALAPPDATA%\Shellside`, and adds Start menu and desktop
+  shortcuts and an entry in Settings → Apps for uninstalling (which keeps your boards). SmartScreen checks files a
+  browser marks as downloaded from the internet; PowerShell doesn't mark them, so the unsigned app opens without a
+  warning (Defender still scans it). Run it again to update; quit Shellside first. CI runs it on every build.
 - **Where things are:** board folders in `~/Shellside/<boardId>` (`%USERPROFILE%\Shellside` on Windows); boards,
   sign-ins of the board browser and paired browsers in the app's data folder
   (`~/Library/Application Support/Shellside/data`, `%APPDATA%\Shellside\data`); the server log in
@@ -327,6 +333,7 @@ test/terminal-check.mjs End-to-end check of a board terminal on this OS, with a 
 desktop/main.mjs     Desktop app: starts the server in a utility process, the window, menus, pairing codes
 desktop/build.mjs    Stages the desktop app for electron-builder (electron-builder.config.cjs)
 desktop/signpath/    SignPath artifact configurations for signing the Windows app and installer
+desktop/install.ps1  The Windows one-line install (irm … | iex): latest release's .zip, shortcuts, uninstall entry
 ```
 
 ## Data

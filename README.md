@@ -133,12 +133,19 @@ opens in its own window; there is nothing to start from a terminal or PowerShell
 | --- | --- |
 | macOS, Apple silicon | `Shellside-<version>-mac-arm64.dmg` |
 | macOS, Intel | `Shellside-<version>-mac-x64.dmg` |
-| Windows 10/11 (x64) | `Shellside-Setup-<version>-x64.exe` (or the `.zip`, which runs without installing) |
+| Windows 10/11 (x64) | One line in PowerShell (below), or `Shellside-Setup-<version>-x64.exe`, or the `.zip` |
+
+On Windows, this installs the latest release and starts it (run it again to update; uninstall in Settings → Apps):
+
+```powershell
+irm https://raw.githubusercontent.com/NAMYUNWOO/Shellside/main/poc/desktop/install.ps1 | iex
+```
 
 You still need [Claude Code](https://code.claude.com/docs/en/setup) installed and signed in, and Chrome for the board
 browser (Edge, which Windows has, works too). The macOS app is signed with Developer ID and notarized by Apple, so it
-opens like any other app. The Windows app isn't signed yet (see [Code signing policy](#code-signing-policy)): when
-SmartScreen says "Windows protected your PC", choose **More info** → **Run anyway**.
+opens like any other app. The Windows app isn't signed yet (see [Code signing policy](#code-signing-policy)). Installed
+with the PowerShell line it opens without a warning; the setup program and the `.zip` from a browser get SmartScreen's
+"Windows protected your PC": choose **More info** → **Run anyway**.
 
 Details (where boards are kept, other browsers, building it yourself) are in
 [poc/README.md](poc/README.md#desktop-app).

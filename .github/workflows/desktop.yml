@@ -193,6 +193,44 @@ jobs:
           logs() { cat "$out/stdout.txt"; cat "$out/profile/logs/server.log" "$HOME/Library/Logs/Shellside/server.log" 2> /dev/null; }
           cat "$SHELLSIDE_SMOKE" || { echo "no result"; logs; exit 1; }
           node -e "const r = require(process.argv[1]); process.exit(r.ok ? 0 : 1)" "$SHELLSIDE_SMOKE" || { logs; exit 1; }
+      # The one-line install, as people run it (Windows PowerShell 5.1, the script fetched with irm), from the .zip just
+      # built; then: no "downloaded from the internet" mark on what PowerShell downloads (so no SmartScreen prompt), the
+      # installed app starts, and the Settings → Apps uninstall removes it.
+      - name: Install with install.ps1
+        if: matrix.name == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:SHELLSIDE_ZIP = (Get-ChildItem release\Shellside-*-win-x64.zip)[0].FullName
+          $env:SHELLSIDE_NO_LAUNCH = '1'
+          irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/poc/desktop/install.ps1" | iex
+          $dir = Join-Path $env:LOCALAPPDATA 'Shellside'
+          foreach ($p in "$dir\Shellside.exe", "$([Environment]::GetFolderPath('Programs'))\Shellside.lnk", "$([Environment]::GetFolderPath('Desktop'))\Shellside.lnk") {
+            if (-not (Test-Path -LiteralPath $p)) { throw "missing: $p" }
+          }
+          Invoke-WebRequest "https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip" -OutFile "$env:RUNNER_TEMP\downloaded.zip" -UseBasicParsing
+          $streams = @(Get-Item -LiteralPath "$env:RUNNER_TEMP\downloaded.zip" -Stream * | ForEach-Object Stream)
+          "streams on a file Invoke-WebRequest downloaded: $($streams -join ', ')"
+          if ($streams -contains 'Zone.Identifier') { throw 'Invoke-WebRequest marked the download as from the internet' }
+          $out = "$env:RUNNER_TEMP\installed-smoke"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $env:SHELLSIDE_SMOKE = "$out\result.json"; $env:WB_DATA_DIR = "$out\data"; $env:WB_WORKSPACES = "$out\ws"
+          $app = Start-Process -FilePath "$dir\Shellside.exe" -ArgumentList "--user-data-dir=$out\profile" -PassThru
+          for ($i = 0; $i -lt 180 -and -not (Test-Path $env:SHELLSIDE_SMOKE); $i++) { Start-Sleep 1 }
+          Start-Sleep 2
+          $r = Get-Content -Raw $env:SHELLSIDE_SMOKE | ConvertFrom-Json
+          "installed app: ok=$($r.ok) shell=$($r.shell) wb=$($r.wb)"
+          if (-not $r.ok) { throw 'the installed app did not pass its check' }
+          Remove-Item Env:SHELLSIDE_SMOKE, Env:WB_DATA_DIR, Env:WB_WORKSPACES
+          $uninstall = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Shellside').UninstallString
+          Start-Process -FilePath cmd.exe -ArgumentList '/c', $uninstall -Wait
+          if (Test-Path -LiteralPath $dir) { throw 'uninstall left the app folder' }
+          if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Shellside') { throw 'uninstall left its entry' }
+          'install, run and uninstall: ok'
+      - name: Ship install.ps1 with the builds
+        if: matrix.name == 'Windows'
+        shell: bash
+        run: cp install.ps1 release/
       - uses: actions/upload-artifact@v6
         with:
           name: shellside-${{ matrix.name }}
@@ -200,6 +238,7 @@ jobs:
             poc/desktop/release/*.dmg
             poc/desktop/release/*.zip
             poc/desktop/release/*.exe
+            poc/desktop/release/*.ps1
           if-no-files-found: error
 
   release:
