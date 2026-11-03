@@ -3,7 +3,7 @@
 #   irm https://raw.githubusercontent.com/NAMYUNWOO/Shellside/main/poc/desktop/install.ps1 | iex
 #
 # Downloads the latest release's Shellside-<version>-win-x64.zip, checks it against the release's SHA256SUMS.txt,
-# unpacks it into %LOCALAPPDATA%\Shellside, adds Start menu and desktop shortcuts and an entry in Settings →
+# unpacks it into %LOCALAPPDATA%\Shellside, adds Start menu and desktop shortcuts and an entry in Settings >
 # Apps (to uninstall), then starts Shellside. Run it again to update. Uninstalling keeps your boards
 # (%USERPROFILE%\Shellside) and the app's data (%APPDATA%\Shellside).
 #
@@ -20,12 +20,12 @@
   $dir = if ($env:SHELLSIDE_INSTALL_DIR) { $env:SHELLSIDE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Shellside' }
   $exe = Join-Path $dir 'Shellside.exe'
   $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Shellside'
-  function Say([string]$en, [string]$ko) { Write-Host "$en · $ko" }
+  function Say([string]$text) { Write-Host $text }
 
   if (-not [Environment]::Is64BitOperatingSystem) { throw 'Shellside needs 64-bit Windows.' }
 
   # Which version to install: a .zip given here, a given release, or the latest. The latest comes from where
-  # github.com/<repo>/releases/latest redirects (…/releases/tag/v<version>), not from api.github.com, which allows only
+  # github.com/<repo>/releases/latest redirects (.../releases/tag/v<version>), not from api.github.com, which allows only
   # 60 requests an hour per address (and offices share one).
   if ($env:SHELLSIDE_ZIP) {
     $version = if ($env:SHELLSIDE_ZIP_VERSION) { $env:SHELLSIDE_ZIP_VERSION } else { 'local' }
@@ -47,14 +47,14 @@
   $zipName = "Shellside-$version-win-x64.zip"
   $installed = (Get-ItemProperty -Path $uninstallKey -ErrorAction SilentlyContinue).DisplayVersion
   if ($installed -and $installed -eq $version -and $version -ne 'local' -and -not $env:SHELLSIDE_FORCE -and (Test-Path -LiteralPath $exe)) {
-    Say "Shellside $version is installed and up to date." "Shellside $version 최신 버전이 설치되어 있습니다."
+    Say "Shellside $version is installed and up to date."
     if (-not $env:SHELLSIDE_NO_LAUNCH) { Start-Process -FilePath $exe -WorkingDirectory $dir }
     return
   }
 
   # Its files are in use while it runs.
   if (Get-Process -Name Shellside -ErrorAction SilentlyContinue) {
-    Say 'Quit Shellside first, then run this again.' 'Shellside를 먼저 종료한 뒤 다시 실행하세요.'
+    Say 'Quit Shellside first, then run this again.'
     return
   }
 
@@ -70,9 +70,7 @@
       $line = @($sums -split "`n" | Where-Object { $_ -match ('^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($zipName) + '\s*$') })[0]
       if (-not $line) { throw "Release v$version lists no SHA-256 for $zipName." }
       $expected = ($line -split '\s+')[0]
-      $what = if ($installed) { "Updating Shellside $installed to $version" } else { "Downloading Shellside $version" }
-      $whatKo = if ($installed) { "Shellside $installed → $version 업데이트 중" } else { "Shellside $version 내려받는 중" }
-      Say "$what..." "$whatKo..."
+      Say $(if ($installed) { "Updating Shellside $installed to $version..." } else { "Downloading Shellside $version..." })
       Invoke-WebRequest -Uri "$base/$zipName" -OutFile $zip -UseBasicParsing
       if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $expected.ToUpper()) { throw 'The download does not match the release (SHA-256). Run this again.' }
     }
@@ -98,7 +96,7 @@
     $link.Save()
   }
 
-  # Settings → Apps → Shellside → Uninstall: removes the app, its shortcuts and this entry (not your boards).
+  # Settings > Apps > Shellside > Uninstall: removes the app, its shortcuts and this entry (not your boards).
   $q = { param($p) "'" + ($p -replace "'", "''") + "'" }
   $uninstall = "Get-Process -Name Shellside -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 1; " +
     "Remove-Item -LiteralPath $(& $q $dir) -Recurse -Force -ErrorAction SilentlyContinue; " +
@@ -118,6 +116,7 @@
   foreach ($name in $entry.Keys) { New-ItemProperty -Path $uninstallKey -Name $name -Value $entry[$name] -PropertyType String -Force | Out-Null }
   foreach ($name in 'NoModify', 'NoRepair') { New-ItemProperty -Path $uninstallKey -Name $name -Value 1 -PropertyType DWord -Force | Out-Null }
 
-  Say "Installed Shellside $version in $dir. Start it from the Start menu; uninstall in Settings > Apps." "설치했습니다. 시작 메뉴에서 여세요. 제거는 설정 > 앱에서 합니다."
+  Say "Installed Shellside $version in $dir."
+  Say 'Start it from the Start menu. To update, run this line again; to uninstall, use Settings > Apps.'
   if (-not $env:SHELLSIDE_NO_LAUNCH) { Start-Process -FilePath $exe -WorkingDirectory $dir }
 }

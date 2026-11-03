@@ -43,26 +43,62 @@ If MCP is unavailable, the \`wb\` CLI does the same (\`wb help\`). Answer in the
 // The first settings we shipped (no hooks). Files still equal to it are ours to upgrade.
 const SETTINGS_V1 = JSON.stringify({ enabledMcpjsonServers: ["workboard"], permissions: { allow: ["mcp__workboard"] } }, null, 2) + "\n";
 
+/** Where a board's hooks report: its hook URL, and bin/ (the wb CLI) for the one hook that can't be an HTTP hook. */
+export interface HookTarget {
+  url: string;
+  binDir: string;
+}
+
+const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
 /**
- * Claude Code hooks report Claude's state (idle / busy / waiting for permission) to the board. They are HTTP hooks
- * (Claude Code 2.1.63+): Claude Code POSTs the hook input to this board's server itself, so no shell or Node runs per
- * hook, and nothing depends on how a shell quotes paths (PowerShell runs `"C:\…\node.exe" …` as a mere string).
+ * SessionStart (Claude is up and takes input) can't be an HTTP hook: Claude Code runs only command (and, after MCP is
+ * connected, mcp_tool) hooks there. Windows: curl.exe (in Windows since 10 1803) posts the hook input as is, started
+ * directly (exec form: no shell to quote for, Git Bash or not); without it, PowerShell does. macOS/Linux: the wb CLI,
+ * through the shell (WB_NODE in the terminal's env says which runtime runs it). None prints anything: a SessionStart
+ * hook's output would be added to Claude's context.
  */
-function settingsFor(hookUrl: string) {
-  const hook = (matcher?: string) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: "http", url: hookUrl, headers: { "x-wb-actor": "agent" }, timeout: 5 }] }];
+function sessionStartHook({ url, binDir }: HookTarget) {
+  if (process.platform === "win32") {
+    const system = join(process.env.SystemRoot || "C:\\Windows", "System32");
+    const curl = join(system, "curl.exe");
+    if (existsSync(curl)) {
+      return { type: "command", command: curl, args: ["-s", "-m", "3", "--noproxy", "*", "-o", "NUL", "-H", "content-type: application/json", "-H", "x-wb-actor: agent", "--data-binary", "@-", url], timeout: 5 };
+    }
+    const post =
+      `$ProgressPreference = 'SilentlyContinue'; try { $c = New-Object Net.WebClient; $c.Proxy = $null; ` +
+      `$c.Headers['content-type'] = 'application/json'; $c.Headers['x-wb-actor'] = 'agent'; ` +
+      `[void]$c.UploadString('${url.replace(/'/g, "''")}', [Console]::In.ReadToEnd()) } catch {}`;
+    return {
+      type: "command",
+      command: join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
+      args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(post, "utf16le").toString("base64")],
+      timeout: 10,
+    };
+  }
+  return { type: "command", command: `${shQuote(join(binDir, "wb"))} hook SessionStart`, timeout: 5 };
+}
+
+/**
+ * Claude Code hooks report Claude's state (idle / busy / waiting for permission) to the board. All but SessionStart
+ * are HTTP hooks (Claude Code 2.1.63+): Claude Code POSTs the hook input to this board's server itself, so no shell or
+ * Node runs per hook (one runs after every tool call), and nothing depends on how a shell quotes paths.
+ */
+function settingsFor(target: HookTarget) {
+  const http = (matcher?: string) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: "http", url: target.url, headers: { "x-wb-actor": "agent" }, timeout: 5 }] }];
   return (
     JSON.stringify(
       {
         enabledMcpjsonServers: ["workboard"],
         permissions: { allow: ["mcp__workboard"] },
         hooks: {
-          SessionStart: hook(),
-          UserPromptSubmit: hook(),
-          Notification: hook(),
-          PostToolUse: hook("*"),
-          Stop: hook(),
-          StopFailure: hook(),
-          SessionEnd: hook(),
+          SessionStart: [{ hooks: [sessionStartHook(target)] }],
+          UserPromptSubmit: http(),
+          Notification: http(),
+          PostToolUse: http("*"),
+          Stop: http(),
+          StopFailure: http(),
+          SessionEnd: http(),
         },
       },
       null,
@@ -135,7 +171,7 @@ Set-WbForeground 'powershell'
 export const powershellArgs = () => ["-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(POWERSHELL_INIT, "utf16le").toString("base64")];
 
 /** Files that attach a board to any Claude session started in its terminal (kept in WorkBoard's data folder). */
-export function writeSessionKit(dir: string, mcpUrl: string, hookUrl: string) {
+export function writeSessionKit(dir: string, mcpUrl: string, hooks: HookTarget) {
   mkdirSync(dir, { recursive: true });
   const kit = {
     mcpConfig: join(dir, "mcp.json"),
@@ -144,14 +180,14 @@ export function writeSessionKit(dir: string, mcpUrl: string, hookUrl: string) {
     bashrc: join(dir, "bashrc"),
   };
   writeFileSync(kit.mcpConfig, JSON.stringify({ mcpServers: { workboard: { type: "http", url: mcpUrl } } }, null, 2) + "\n");
-  writeFileSync(kit.settings, settingsFor(hookUrl));
+  writeFileSync(kit.settings, settingsFor(hooks));
   writeFileSync(kit.rules, BOARD_RULES);
   writeFileSync(kit.bashrc, BASHRC);
   return kit;
 }
 
 /** mcpUrl: this board's own MCP endpoint, so the Claude session started here sees only its board. */
-export function prepareWorkspace(dir: string, mcpUrl: string, hookUrl: string) {
+export function prepareWorkspace(dir: string, mcpUrl: string, hooks: HookTarget) {
   mkdirSync(join(dir, ".claude"), { recursive: true });
 
   // .mcp.json is managed by WorkBoard: rewritten on every start so the URL stays right.
@@ -178,7 +214,7 @@ export function prepareWorkspace(dir: string, mcpUrl: string, hookUrl: string) {
   // .claude/settings.json: ours while it is exactly what we last wrote (hash kept beside it); edited by hand = theirs.
   const settingsPath = join(dir, ".claude", "settings.json");
   const markPath = join(dir, ".claude", ".workboard-settings.sha1");
-  const want = settingsFor(hookUrl);
+  const want = settingsFor(hooks);
   const current = existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : null;
   const ours = current === null || current === SETTINGS_V1 || (existsSync(markPath) && readFileSync(markPath, "utf8").trim() === sha(current));
   if (ours && current !== want) {

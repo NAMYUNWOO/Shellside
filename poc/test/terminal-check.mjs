@@ -4,7 +4,8 @@
 // Claude Code's HTTP hooks move the board's state; `claude auth status` works (claude.cmd on Windows).
 //   node test/terminal-check.mjs
 import { spawn } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -136,6 +137,21 @@ const fakeFound = !!which && which.toLowerCase().startsWith(fakeDir.toLowerCase(
 check("the terminal finds the fake claude", fakeFound, which ?? "nothing");
 if (!fakeFound) await finish("stopping: a request now could start a real Claude");
 
+// The SessionStart hook from the board's settings, run as Claude Code runs it: exec form (command + args, no shell) or
+// through sh, with the terminal's environment and the hook input on stdin. It must print nothing (that would go into
+// Claude's context). WB_URL can point it somewhere else (only the wb CLI form reads it).
+async function runSessionStartHook(wbUrl = BASE) {
+  const settings = JSON.parse(readFileSync(join(tmp, "data", "sessions", "main", "settings.json"), "utf8"));
+  const h = settings.hooks.SessionStart[0].hooks[0];
+  const env = { ...process.env, WB_URL: wbUrl, WB_BOARD: "main", WB_NODE: process.execPath };
+  const child = h.args ? spawn(h.command, h.args, { env }) : spawn("sh", ["-c", h.command], { env });
+  let stdout = "";
+  child.stdout.on("data", (d) => (stdout += d));
+  child.stdin.end(JSON.stringify({ session_id: "s1", hook_event_name: "SessionStart", source: "startup", cwd: tmp }));
+  const code = await new Promise((r) => child.on("close", r));
+  return { type: h.type, form: h.args ? "exec" : "shell", code, stdout };
+}
+
 // A request from the board while the shell is in front: Claude starts with it.
 const prompt = `Say "hi" — 한국어 'single' $HOME %PATH% \`tick\` & | ; done.\nSecond line.`;
 const sent = await api("POST", "/api/b/main/agent/send", { prompt, toolIds: [] });
@@ -147,16 +163,32 @@ if (WIN) {
   check("the claude wrapper adds the board's MCP config, settings and rules", ["--mcp-config", "--settings", "--append-system-prompt-file"].every((f) => argv.includes(f)), JSON.stringify(argv).slice(0, 300));
   const t = (await status()).terminal;
   check("the board sees Claude running (and not ready yet)", t.claudeRunning && t.agentState === "starting", JSON.stringify(t));
-  // What Claude Code's HTTP hook posts when the session is up; the board then pastes the request.
-  const h = await hook({ session_id: "s1", hook_event_name: "SessionStart", source: "startup" });
-  check("an HTTP hook is answered with an empty 204", h.status === 204 && h.data === null, String(h.status));
-  check("SessionStart makes Claude ready", (await status()).terminal.agentState === "idle");
+  // The board's SessionStart hook, as Claude Code runs it when the session is up; the board then pastes the request.
+  const ran = await runSessionStartHook();
+  check("the SessionStart hook is a command hook that runs and prints nothing", ran.type === "command" && ran.code === 0 && ran.stdout === "", JSON.stringify(ran));
+  check("SessionStart makes Claude ready", (await status()).terminal.agentState === "idle", (await status()).terminal.agentState);
   const got = await until("paste", () => /GOT:([A-Za-z0-9+/=]+)/.exec(out)?.[1], 15000);
   const text = got ? strip(Buffer.from(got, "base64").toString("utf8")) : "";
   check("the request reaches Claude intact", text.replace(/\r\n?/g, "\n") === prompt, JSON.stringify(text).slice(0, 200));
 } else {
   check("the request reaches Claude intact as its argument", argv.at(-1) === prompt, JSON.stringify(argv.at(-1)).slice(0, 200));
   type("\r"); // the fake Claude ends at Enter
+  // The fake Claude shows as "node" here, so the board can't count it as Claude: catch what the hook sends instead.
+  const caught = [];
+  const catcher = createHttpServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      caught.push({ url: req.url, actor: req.headers["x-wb-actor"], body });
+      res.writeHead(200, { "content-type": "application/json" }).end("{}");
+    });
+  });
+  await new Promise((r) => catcher.listen(0, "127.0.0.1", r));
+  const ran = await runSessionStartHook(`http://127.0.0.1:${catcher.address().port}`);
+  catcher.close();
+  const got = caught[0];
+  check("the SessionStart hook runs and prints nothing", ran.type === "command" && ran.code === 0 && ran.stdout === "", JSON.stringify(ran));
+  check("…and reports SessionStart for this board as the agent", got?.url === "/api/b/main/agent/hook" && got.actor === "agent" && JSON.parse(got.body).event === "SessionStart", JSON.stringify(got));
 }
 check("the shell is in front again when Claude exits", !!(await until("back", async () => isShellName((await status()).terminal.foreground), 35000)));
 

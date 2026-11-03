@@ -98,10 +98,10 @@ export class BoardRuntime {
     opts: RegistryOptions,
   ) {
     const mcpUrl = `${opts.serverUrl}/mcp/${meta.id}`;
-    const hookUrl = `${opts.serverUrl}/api/b/${meta.id}/agent/hook`;
+    const hooks = { url: `${opts.serverUrl}/api/b/${meta.id}/agent/hook`, binDir: opts.binDir };
     const sessionDir = join(opts.dataDir, "sessions", meta.id);
-    prepareWorkspace(meta.workspace, mcpUrl, hookUrl);
-    const kit = writeSessionKit(sessionDir, mcpUrl, hookUrl);
+    prepareWorkspace(meta.workspace, mcpUrl, hooks);
+    const kit = writeSessionKit(sessionDir, mcpUrl, hooks);
     this.board = new Board(join(opts.dataDir, "boards", `${meta.id}.json`), opts.compile);
     this.browsers = new BoardBrowsers(opts.browsers, meta.id, this.board, meta.workspace);
     const { shell, args, powershell } = boardShell(kit.bashrc);
