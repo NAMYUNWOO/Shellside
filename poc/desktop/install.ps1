@@ -52,10 +52,19 @@
     return
   }
 
-  # Its files are in use while it runs.
-  if (Get-Process -Name Shellside -ErrorAction SilentlyContinue) {
+  # Its files are in use while it runs. A Shellside from this folder that has no window is left over (before 0.1.5 it
+  # could stay running after its window closed): stop it. One with a window is the person's to quit.
+  $running = @(Get-Process -Name Shellside -ErrorAction SilentlyContinue | Where-Object {
+      try { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    })
+  if (@($running | Where-Object { $_.MainWindowHandle -ne 0 }).Count) {
     Say 'Quit Shellside first, then run this again.'
     return
+  }
+  if ($running.Count) {
+    Say 'Stopping a Shellside that was left running in the background...'
+    $running | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
   }
 
   $tmp = Join-Path ([IO.Path]::GetTempPath()) ('shellside-' + [guid]::NewGuid())

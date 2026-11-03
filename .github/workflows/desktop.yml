@@ -197,7 +197,8 @@ jobs:
           node -e "const r = require(process.argv[1]); process.exit(r.ok && /^\d+\.\d+\.\d+/.test(r.update?.version ?? '') ? 0 : 1)" "$SHELLSIDE_SMOKE" || { logs; exit 1; }
       # The one-line install, as people run it (Windows PowerShell 5.1, the script fetched with irm), from the .zip just
       # built: install, the same version again (says up to date, changes nothing), a newer one (replaces the app), one
-      # while Shellside runs (refused); no "downloaded from the internet" mark on what PowerShell downloads (so no
+      # while Shellside runs (refused), closing its window (nothing stays running), one over a windowless leftover
+      # (stopped, then installed); no "downloaded from the internet" mark on what PowerShell downloads (so no
       # SmartScreen prompt); the installed app starts; the Settings → Apps uninstall removes it.
       - name: Install, update and uninstall with install.ps1
         if: matrix.name == 'Windows'
@@ -237,8 +238,20 @@ jobs:
           $log = & $run
           $log
           if ($log -notmatch 'Quit Shellside first' -or (& $version) -ne '0.1.0') { throw 'it installed over a running Shellside' }
-          Get-Process -Name Shellside -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep 3
+          # Closing its window quits the app for good: no Shellside process stays behind.
+          @(Get-Process -Name Shellside -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }) | ForEach-Object { [void]$_.CloseMainWindow() }
+          for ($i = 0; $i -lt 30 -and (Get-Process -Name Shellside -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+          $left = @(Get-Process -Name Shellside -ErrorAction SilentlyContinue)
+          "Shellside processes after closing the window: $($left.Count)"
+          if ($left.Count) { $left | Stop-Process -Force; throw 'closing the window left Shellside running' }
+          # A windowless Shellside left over (as older versions could leave): the install stops it and goes on.
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          Start-Process -FilePath "$dir\Shellside.exe" -ArgumentList '-e', 'setTimeout(() => {}, 120000)' -WindowStyle Hidden
+          Remove-Item Env:ELECTRON_RUN_AS_NODE
+          for ($i = 0; $i -lt 20 -and -not (Get-Process -Name Shellside -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+          $log = & $run
+          $log
+          if ($log -notmatch 'left running in the background' -or (& $version) -ne '0.2.0') { throw 'a leftover background Shellside blocked the update' }
           Remove-Item Env:SHELLSIDE_ZIP_VERSION
 
           Invoke-WebRequest "https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip" -OutFile "$env:RUNNER_TEMP\downloaded.zip" -UseBasicParsing

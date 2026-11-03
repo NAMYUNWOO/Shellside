@@ -191,6 +191,13 @@ function createWindow() {
   });
   win.once("ready-to-show", () => !SMOKE && win.show());
   win.on("closed", () => (win = null));
+  // Windows and Linux: closing the window quits the app. Ask while the window is still there, so the question shows on
+  // top of it (asked after it closed, it could open behind other windows and leave the app running unseen).
+  win.on("close", (e) => {
+    if (process.platform === "darwin" || quitting || SMOKE) return;
+    e.preventDefault();
+    void requestQuit();
+  });
   // Only the board opens in this window; links elsewhere go to the default browser.
   const external = (url) => /^https?:\/\//i.test(url) && void shell.openExternal(url);
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -304,21 +311,31 @@ async function confirmQuit() {
   return response === 0;
 }
 
+/** Ask first (when Claude runs somewhere), then stop the server and exit. The app never stays behind without a
+ *  window: whatever happens, it is gone 8 s after quitting starts. */
+let asking = false;
+async function requestQuit() {
+  if (quitting || asking) return;
+  asking = true;
+  const ok = await confirmQuit().finally(() => (asking = false));
+  if (!ok) return;
+  quitting = true;
+  setTimeout(() => app.exit(0), 8000).unref?.();
+  const s = server;
+  if (!s) return app.exit(0);
+  // The server stops its terminals and its browser itself; kill it if it takes too long.
+  const timer = setTimeout(() => s.kill(), 4000);
+  s.once("exit", () => {
+    clearTimeout(timer);
+    app.exit(0);
+  });
+  s.postMessage({ type: "quit" });
+}
+
 app.on("before-quit", (e) => {
   if (quitting || !server) return;
   e.preventDefault();
-  void confirmQuit().then((ok) => {
-    if (!ok) return;
-    quitting = true;
-    const s = server;
-    // The server stops its terminals and its browser itself; kill it if it takes too long.
-    const timer = setTimeout(() => s?.kill(), 4000);
-    s.once("exit", () => {
-      clearTimeout(timer);
-      app.quit();
-    });
-    s.postMessage({ type: "quit" });
-  });
+  void requestQuit();
 });
 
 /** CI: the board loads, a terminal starts the shell, `wb` runs in it with the app's runtime. */
