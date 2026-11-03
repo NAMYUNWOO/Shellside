@@ -186,47 +186,82 @@ jobs:
           out="$tmp/smoke"
           mkdir -p "$out"
           export SHELLSIDE_SMOKE="$out/result.json" WB_DATA_DIR="$out/data" WB_WORKSPACES="$out/ws"
+          # The update check, against a repository that has a published release: it must read a version.
+          export SHELLSIDE_UPDATE_URL=https://github.com/electron/electron/releases/latest
           "${{ matrix.exe }}" --user-data-dir="$out/profile" > "$out/stdout.txt" 2>&1 &
           pid=$!
           for i in $(seq 1 180); do [ -f "$SHELLSIDE_SMOKE" ] && break; sleep 1; done
           sleep 2
           logs() { cat "$out/stdout.txt"; cat "$out/profile/logs/server.log" "$HOME/Library/Logs/Shellside/server.log" 2> /dev/null; }
           cat "$SHELLSIDE_SMOKE" || { echo "no result"; logs; exit 1; }
-          node -e "const r = require(process.argv[1]); process.exit(r.ok ? 0 : 1)" "$SHELLSIDE_SMOKE" || { logs; exit 1; }
+          node -e "const r = require(process.argv[1]); process.exit(r.ok && /^\d+\.\d+\.\d+/.test(r.update?.version ?? '') ? 0 : 1)" "$SHELLSIDE_SMOKE" || { logs; exit 1; }
       # The one-line install, as people run it (Windows PowerShell 5.1, the script fetched with irm), from the .zip just
-      # built; then: no "downloaded from the internet" mark on what PowerShell downloads (so no SmartScreen prompt), the
-      # installed app starts, and the Settings → Apps uninstall removes it.
-      - name: Install with install.ps1
+      # built: install, the same version again (says up to date, changes nothing), a newer one (replaces the app), one
+      # while Shellside runs (refused); no "downloaded from the internet" mark on what PowerShell downloads (so no
+      # SmartScreen prompt); the installed app starts; the Settings → Apps uninstall removes it.
+      - name: Install, update and uninstall with install.ps1
         if: matrix.name == 'Windows'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          $script = "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/poc/desktop/install.ps1"
+          $run = { (& { irm $script | iex } 6>&1 | Out-String).Trim() }
           $env:SHELLSIDE_ZIP = (Get-ChildItem release\Shellside-*-win-x64.zip)[0].FullName
           $env:SHELLSIDE_NO_LAUNCH = '1'
-          irm "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/poc/desktop/install.ps1" | iex
           $dir = Join-Path $env:LOCALAPPDATA 'Shellside'
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Shellside'
+          $version = { (Get-ItemProperty $key).DisplayVersion }
+
+          $env:SHELLSIDE_ZIP_VERSION = '0.0.9'
+          & $run
           foreach ($p in "$dir\Shellside.exe", "$([Environment]::GetFolderPath('Programs'))\Shellside.lnk", "$([Environment]::GetFolderPath('Desktop'))\Shellside.lnk") {
             if (-not (Test-Path -LiteralPath $p)) { throw "missing: $p" }
           }
+          if ((& $version) -ne '0.0.9') { throw "installed version: $(& $version)" }
+
+          Set-Content -LiteralPath "$dir\left-from-0.0.9.txt" -Value 'x'
+          $log = & $run
+          $log
+          if ($log -notmatch 'up to date' -or -not (Test-Path "$dir\left-from-0.0.9.txt")) { throw 'the same version was installed again' }
+
+          $env:SHELLSIDE_ZIP_VERSION = '0.1.0'
+          & $run
+          if ((Test-Path "$dir\left-from-0.0.9.txt") -or (& $version) -ne '0.1.0') { throw 'the update did not replace the app' }
+
+          $data = "$env:RUNNER_TEMP\running"
+          $env:WB_DATA_DIR = "$data\data"; $env:WB_WORKSPACES = "$data\ws"; $env:SHELLSIDE_NO_UPDATE_CHECK = '1'
+          Start-Process -FilePath "$dir\Shellside.exe" -ArgumentList "--user-data-dir=$data\profile"
+          for ($i = 0; $i -lt 60 -and -not (Get-Process -Name Shellside -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
+          Start-Sleep 5
+          $env:SHELLSIDE_ZIP_VERSION = '0.2.0'
+          $log = & $run
+          $log
+          if ($log -notmatch 'Quit Shellside first' -or (& $version) -ne '0.1.0') { throw 'it installed over a running Shellside' }
+          Get-Process -Name Shellside -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 3
+          Remove-Item Env:SHELLSIDE_ZIP_VERSION
+
           Invoke-WebRequest "https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip" -OutFile "$env:RUNNER_TEMP\downloaded.zip" -UseBasicParsing
           $streams = @(Get-Item -LiteralPath "$env:RUNNER_TEMP\downloaded.zip" -Stream * | ForEach-Object Stream)
           "streams on a file Invoke-WebRequest downloaded: $($streams -join ', ')"
           if ($streams -contains 'Zone.Identifier') { throw 'Invoke-WebRequest marked the download as from the internet' }
+
           $out = "$env:RUNNER_TEMP\installed-smoke"
           New-Item -ItemType Directory -Path $out -Force | Out-Null
           $env:SHELLSIDE_SMOKE = "$out\result.json"; $env:WB_DATA_DIR = "$out\data"; $env:WB_WORKSPACES = "$out\ws"
-          $app = Start-Process -FilePath "$dir\Shellside.exe" -ArgumentList "--user-data-dir=$out\profile" -PassThru
+          Start-Process -FilePath "$dir\Shellside.exe" -ArgumentList "--user-data-dir=$out\profile"
           for ($i = 0; $i -lt 180 -and -not (Test-Path $env:SHELLSIDE_SMOKE); $i++) { Start-Sleep 1 }
           Start-Sleep 2
           $r = Get-Content -Raw $env:SHELLSIDE_SMOKE | ConvertFrom-Json
           "installed app: ok=$($r.ok) shell=$($r.shell) wb=$($r.wb)"
           if (-not $r.ok) { throw 'the installed app did not pass its check' }
           Remove-Item Env:SHELLSIDE_SMOKE, Env:WB_DATA_DIR, Env:WB_WORKSPACES
-          $uninstall = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Shellside').UninstallString
+
+          $uninstall = (Get-ItemProperty $key).UninstallString
           Start-Process -FilePath cmd.exe -ArgumentList '/c', $uninstall -Wait
           if (Test-Path -LiteralPath $dir) { throw 'uninstall left the app folder' }
-          if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Shellside') { throw 'uninstall left its entry' }
-          'install, run and uninstall: ok'
+          if (Test-Path $key) { throw 'uninstall left its entry' }
+          'install, update, run and uninstall: ok'
       - name: Ship install.ps1 with the builds
         if: matrix.name == 'Windows'
         shell: bash
@@ -258,6 +293,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # install.ps1 checks the .zip against this; it also lets anyone check what they downloaded.
+          (cd builds && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
           ls -la builds
           if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" builds/* --clobber -R "$GITHUB_REPOSITORY"

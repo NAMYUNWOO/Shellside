@@ -48,11 +48,18 @@ asks first when Claude is running). Download it from
 [Releases](https://github.com/NAMYUNWOO/Shellside/releases/latest).
 
 - **Windows, one line:** `irm https://raw.githubusercontent.com/NAMYUNWOO/Shellside/main/poc/desktop/install.ps1 | iex`
-  ([`desktop/install.ps1`](desktop/install.ps1)) downloads the latest release's `.zip`, checks its SHA-256 against
-  the one GitHub lists for the release, unpacks it into `%LOCALAPPDATA%\Shellside`, and adds Start menu and desktop
+  ([`desktop/install.ps1`](desktop/install.ps1)) finds the latest release from where `github.com/…/releases/latest`
+  redirects (not api.github.com, which allows 60 requests an hour per address), downloads its `.zip`, checks it against
+  the release's `SHA256SUMS.txt`, unpacks it into `%LOCALAPPDATA%\Shellside`, and adds Start menu and desktop
   shortcuts and an entry in Settings → Apps for uninstalling (which keeps your boards). SmartScreen checks files a
   browser marks as downloaded from the internet; PowerShell doesn't mark them, so the unsigned app opens without a
-  warning (Defender still scans it). Run it again to update; quit Shellside first. CI runs it on every build.
+  warning (Defender still scans it). Run it again to update: it skips a version that is installed already
+  (`SHELLSIDE_FORCE=1` installs it again) and asks you to quit Shellside first. CI runs install, update, a refused
+  install over a running app, and uninstall on every build.
+- **Updates:** at start (at most once a day) the app asks github.com for the latest release and says when a newer one
+  is out: installed with the line above, it offers to copy the line; otherwise it opens the download. **Check for
+  Updates…** asks now; **Check for Updates Automatically** (or `SHELLSIDE_NO_UPDATE_CHECK=1`) turns it off. It never
+  updates by itself.
 - **Where things are:** board folders in `~/Shellside/<boardId>` (`%USERPROFILE%\Shellside` on Windows); boards,
   sign-ins of the board browser and paired browsers in the app's data folder
   (`~/Library/Application Support/Shellside/data`, `%APPDATA%\Shellside\data`); the server log in
@@ -331,6 +338,7 @@ web/TerminalPane.tsx The only file that knows about wterm (the point to swap or 
 bin/wb, wb.cmd, wb.mjs  The wb CLI (sh and cmd wrappers around wb.mjs)
 test/terminal-check.mjs End-to-end check of a board terminal on this OS, with a fake claude (CI runs it on all three)
 desktop/main.mjs     Desktop app: starts the server in a utility process, the window, menus, pairing codes
+desktop/updates.mjs  Desktop app: says when a newer release is out (github.com's latest-release redirect)
 desktop/build.mjs    Stages the desktop app for electron-builder (electron-builder.config.cjs)
 desktop/signpath/    SignPath artifact configurations for signing the Windows app and installer
 desktop/install.ps1  The Windows one-line install (irm … | iex): latest release's .zip, shortcuts, uninstall entry

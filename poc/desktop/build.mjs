@@ -57,7 +57,7 @@ for (const dir of readdirSync(join(ptySrc, "prebuilds")).filter((d) => d.startsW
 writeFileSync(join(ptyDst, "package.json"), JSON.stringify({ name: ptyPkg.name, version: ptyPkg.version, license: ptyPkg.license, main: ptyPkg.main }, null, 2) + "\n");
 
 // The app itself.
-cpSync(join(DESKTOP, "main.mjs"), join(STAGE, "main.mjs"));
+for (const f of ["main.mjs", "updates.mjs"]) cpSync(join(DESKTOP, f), join(STAGE, f));
 cpSync(join(POC, "..", "LICENSE"), join(STAGE, "LICENSE"));
 writeFileSync(
   join(STAGE, "package.json"),

@@ -135,7 +135,8 @@ opens in its own window; there is nothing to start from a terminal or PowerShell
 | macOS, Intel | `Shellside-<version>-mac-x64.dmg` |
 | Windows 10/11 (x64) | One line in PowerShell (below), or `Shellside-Setup-<version>-x64.exe`, or the `.zip` |
 
-On Windows, this installs the latest release and starts it (run it again to update; uninstall in Settings → Apps):
+On Windows, this installs the latest release and starts it (run it again to update; it says so when you're up to
+date; uninstall in Settings → Apps):
 
 ```powershell
 irm https://raw.githubusercontent.com/NAMYUNWOO/Shellside/main/poc/desktop/install.ps1 | iex
@@ -205,7 +206,9 @@ Shellside runs a real shell for every board, so treat it like one.
   by the user or the person installing or operating it. Shellside's server listens only on `127.0.0.1`. What leaves the
   machine is what you (or Claude, at your request) do: Claude Code, which you install and sign in to yourself, talks
   to Anthropic under [Anthropic's privacy policy](https://www.anthropic.com/legal/privacy), and the board browser
-  opens the pages asked for, in the Chrome installed on the machine.
+  opens the pages asked for, in the Chrome installed on the machine. The one exception you can turn off: the desktop
+  app asks github.com which release is the latest (at most once a day, sending only its version), and says when a
+  newer one is out. Turn it off in the menu: **Check for Updates Automatically**.
 
 ## Repository layout
 

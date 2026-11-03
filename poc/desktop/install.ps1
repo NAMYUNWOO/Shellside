@@ -2,13 +2,16 @@
 #
 #   irm https://raw.githubusercontent.com/NAMYUNWOO/Shellside/main/poc/desktop/install.ps1 | iex
 #
-# Downloads the latest release's Shellside-<version>-win-x64.zip, checks it against the SHA-256 GitHub lists for the
-# release, unpacks it into %LOCALAPPDATA%\Shellside, adds Start menu and desktop shortcuts and an entry in Settings →
+# Downloads the latest release's Shellside-<version>-win-x64.zip, checks it against the release's SHA256SUMS.txt,
+# unpacks it into %LOCALAPPDATA%\Shellside, adds Start menu and desktop shortcuts and an entry in Settings →
 # Apps (to uninstall), then starts Shellside. Run it again to update. Uninstalling keeps your boards
 # (%USERPROFILE%\Shellside) and the app's data (%APPDATA%\Shellside).
 #
-# Settings: SHELLSIDE_VERSION=0.1.0 (a given release), SHELLSIDE_INSTALL_DIR, SHELLSIDE_NO_LAUNCH=1; SHELLSIDE_ZIP=<file>
-# installs a .zip you already have (CI uses it). Works in Windows PowerShell 5.1 and PowerShell 7.
+# When that version is installed already, it says so and only starts it (SHELLSIDE_FORCE=1 installs it again).
+#
+# Settings: SHELLSIDE_VERSION=0.1.0 (a given release), SHELLSIDE_INSTALL_DIR, SHELLSIDE_NO_LAUNCH=1, SHELLSIDE_FORCE=1;
+# SHELLSIDE_ZIP=<file> (+ SHELLSIDE_ZIP_VERSION) installs a .zip you already have (CI uses it). Works in Windows
+# PowerShell 5.1 and PowerShell 7.
 & {
   $ErrorActionPreference = 'Stop'
   $ProgressPreference = 'SilentlyContinue' # Windows PowerShell 5.1 downloads many times slower with its progress bar
@@ -20,6 +23,35 @@
   function Say([string]$en, [string]$ko) { Write-Host "$en · $ko" }
 
   if (-not [Environment]::Is64BitOperatingSystem) { throw 'Shellside needs 64-bit Windows.' }
+
+  # Which version to install: a .zip given here, a given release, or the latest. The latest comes from where
+  # github.com/<repo>/releases/latest redirects (…/releases/tag/v<version>), not from api.github.com, which allows only
+  # 60 requests an hour per address (and offices share one).
+  if ($env:SHELLSIDE_ZIP) {
+    $version = if ($env:SHELLSIDE_ZIP_VERSION) { $env:SHELLSIDE_ZIP_VERSION } else { 'local' }
+  } elseif ($env:SHELLSIDE_VERSION) {
+    $version = $env:SHELLSIDE_VERSION
+  } else {
+    $request = [System.Net.HttpWebRequest]::Create("https://github.com/$repo/releases/latest")
+    $request.Method = 'HEAD'
+    $request.AllowAutoRedirect = $false
+    $request.UserAgent = 'Shellside-installer'
+    $response = $request.GetResponse()
+    try { $location = [string]$response.Headers['Location'] } finally { $response.Close() }
+    if ($location -notmatch '/releases/tag/([^/?#]+)$') { throw "No Shellside release is published yet (github.com/$repo/releases)." }
+    $version = [Uri]::UnescapeDataString($Matches[1])
+  }
+  $version = $version.TrimStart('v')
+  $base = "https://github.com/$repo/releases/download/v$version"
+  $zipName = "Shellside-$version-win-x64.zip"
+  $installed = (Get-ItemProperty -Path $uninstallKey -ErrorAction SilentlyContinue).DisplayVersion
+  if ($installed -and $installed -eq $version -and $version -ne 'local' -and -not $env:SHELLSIDE_FORCE -and (Test-Path -LiteralPath $exe)) {
+    Say "Shellside $version is installed and up to date." "Shellside $version 최신 버전이 설치되어 있습니다."
+    if (-not $env:SHELLSIDE_NO_LAUNCH) { Start-Process -FilePath $exe -WorkingDirectory $dir }
+    return
+  }
+
+  # Its files are in use while it runs.
   if (Get-Process -Name Shellside -ErrorAction SilentlyContinue) {
     Say 'Quit Shellside first, then run this again.' 'Shellside를 먼저 종료한 뒤 다시 실행하세요.'
     return
@@ -31,18 +63,17 @@
     $zip = Join-Path $tmp 'Shellside.zip'
     if ($env:SHELLSIDE_ZIP) {
       Copy-Item -LiteralPath $env:SHELLSIDE_ZIP -Destination $zip
-      $version = 'local'
     } else {
-      $which = if ($env:SHELLSIDE_VERSION) { 'tags/v' + $env:SHELLSIDE_VERSION.TrimStart('v') } else { 'latest' }
-      $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/$which" -Headers @{ 'User-Agent' = 'Shellside-installer' }
-      $asset = @($release.assets | Where-Object { $_.name -like 'Shellside-*-win-x64.zip' })[0]
-      if (-not $asset) { throw "Release $($release.tag_name) has no Windows .zip." }
-      $version = $release.tag_name
-      Say "Downloading Shellside $version ($([math]::Round($asset.size / 1MB)) MB)..." "Shellside $version 내려받는 중..."
-      Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
-      if ($asset.digest -match '^sha256:([0-9a-fA-F]{64})$') {
-        if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $Matches[1]) { throw 'The download does not match the release (SHA-256). Run this again.' }
-      }
+      $sums = (Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -UseBasicParsing).Content
+      if ($sums -is [byte[]]) { $sums = [Text.Encoding]::UTF8.GetString($sums) }
+      $line = @($sums -split "`n" | Where-Object { $_ -match ('^([0-9a-fA-F]{64})\s+\*?' + [regex]::Escape($zipName) + '\s*$') })[0]
+      if (-not $line) { throw "Release v$version lists no SHA-256 for $zipName." }
+      $expected = ($line -split '\s+')[0]
+      $what = if ($installed) { "Updating Shellside $installed to $version" } else { "Downloading Shellside $version" }
+      $whatKo = if ($installed) { "Shellside $installed → $version 업데이트 중" } else { "Shellside $version 내려받는 중" }
+      Say "$what..." "$whatKo..."
+      Invoke-WebRequest -Uri "$base/$zipName" -OutFile $zip -UseBasicParsing
+      if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $expected.ToUpper()) { throw 'The download does not match the release (SHA-256). Run this again.' }
     }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $new = Join-Path $tmp 'app'
@@ -76,7 +107,7 @@
   New-Item -Path $uninstallKey -Force | Out-Null
   $entry = [ordered]@{
     DisplayName     = 'Shellside'
-    DisplayVersion  = $version.TrimStart('v')
+    DisplayVersion  = $version
     Publisher       = 'NAM YUNWOO'
     DisplayIcon     = "$exe,0"
     InstallLocation = $dir

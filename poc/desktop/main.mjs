@@ -8,6 +8,7 @@ import { createServer } from "node:net";
 import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkForUpdates, latestRelease, setAutoCheck, updateSettings } from "./updates.mjs";
 
 const APP_DIR = dirname(fileURLToPath(import.meta.url));
 const ko = () => app.getLocale().startsWith("ko");
@@ -208,8 +209,30 @@ function createWindow() {
 function buildMenu() {
   const mac = process.platform === "darwin";
   const folder = (p) => () => void shell.openPath(p);
+  const updates = [
+    { label: T("Check for Updates…", "업데이트 확인…"), click: () => void checkForUpdates({ manual: true, parent: win ?? undefined, T }) },
+    { label: T("Check for Updates Automatically", "업데이트 자동 확인"), type: "checkbox", checked: updateSettings().auto, click: (item) => setAutoCheck(item.checked) },
+  ];
   const template = [
-    ...(mac ? [{ role: "appMenu" }] : []),
+    ...(mac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: "about" },
+              ...updates,
+              { type: "separator" },
+              { role: "services" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              { role: "quit" },
+            ],
+          },
+        ]
+      : []),
     {
       label: T("File", "파일"),
       submenu: [
@@ -225,7 +248,10 @@ function buildMenu() {
     { role: "windowMenu" },
     {
       role: "help",
-      submenu: [{ label: T("Shellside on GitHub", "GitHub의 Shellside"), click: () => void shell.openExternal("https://github.com/NAMYUNWOO/Shellside") }],
+      submenu: [
+        ...(mac ? [] : [...updates, { type: "separator" }]),
+        { label: T("Shellside on GitHub", "GitHub의 Shellside"), click: () => void shell.openExternal("https://github.com/NAMYUNWOO/Shellside") },
+      ],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -304,6 +330,8 @@ async function smoke(file) {
       })()`),
     );
     result.ok = result.health?.ok === true && !!result.shell && result.echo && result.wb;
+    // With SHELLSIDE_UPDATE_URL (a test server), also: the update check reads the latest version.
+    if (process.env.SHELLSIDE_UPDATE_URL) result.update = await latestRelease().catch((err) => ({ error: String(err?.message ?? err) }));
   } catch (err) {
     result.ok = false;
     result.error = String(err?.stack ?? err);
@@ -350,5 +378,6 @@ if (!app.requestSingleInstanceLock()) {
     buildMenu();
     createWindow();
     if (SMOKE) void smoke(SMOKE);
+    else setTimeout(() => void checkForUpdates({ parent: win ?? undefined, T }), 8000);
   });
 }
