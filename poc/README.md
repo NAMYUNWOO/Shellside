@@ -88,7 +88,9 @@ certificate):
    With it in the login keychain, `npm run dist` on that Mac signs with it (`SHELLSIDE_SIGN=0` skips signing).
 2. App Store Connect → Users and Access → Integrations → **Team Keys** → **+** (access: Developer). Download the
    `AuthKey_<id>.p8` (only once) and note the key ID and the issuer ID. Locally, notarization runs when
-   `APPLE_API_KEY` (path of the .p8), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` are set.
+   `APPLE_API_KEY` (path of the .p8), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` are set; the app and the .dmg files
+   are notarized and stapled (`notarize-dmg.cjs`). Certificates from the first Developer ID CA end on 1 February 2027;
+   make a "G2 Sub-CA" one before then.
 3. For CI, export the certificate from Keychain Access (My Certificates → Developer ID Application → Export, with a
    password) and add the repository secrets:
 

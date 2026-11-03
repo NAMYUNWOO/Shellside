@@ -136,11 +136,9 @@ opens in its own window; there is nothing to start from a terminal or PowerShell
 | Windows 10/11 (x64) | `Shellside-Setup-<version>-x64.exe` (or the `.zip`, which runs without installing) |
 
 You still need [Claude Code](https://code.claude.com/docs/en/setup) installed and signed in, and Chrome for the board
-browser (Edge, which Windows has, works too). Builds are being moved to signed releases (see
-[Code signing policy](#code-signing-policy)). Until a release is signed, the first open takes one more step:
-
-- **macOS:** open the app once and close the warning, then System Settings → Privacy & Security → **Open Anyway**.
-- **Windows:** when SmartScreen says "Windows protected your PC", choose **More info** → **Run anyway**.
+browser (Edge, which Windows has, works too). The macOS app is signed with Developer ID and notarized by Apple, so it
+opens like any other app. The Windows app isn't signed yet (see [Code signing policy](#code-signing-policy)): when
+SmartScreen says "Windows protected your PC", choose **More info** → **Run anyway**.
 
 Details (where boards are kept, other browsers, building it yourself) are in
 [poc/README.md](poc/README.md#desktop-app).

@@ -56,7 +56,9 @@ module.exports = {
       NSDownloadsFolderUsageDescription: "A program in a Shellside board terminal wants to use files in your Downloads folder.",
     },
   },
-  dmg: { artifactName: "Shellside-${version}-mac-${arch}.${ext}" },
+  // The .dmg is signed too, and notarized with the app's credentials (notarize-dmg.cjs).
+  dmg: { artifactName: "Shellside-${version}-mac-${arch}.${ext}", sign: signMac },
+  afterAllArtifactBuild: notarize ? "notarize-dmg.cjs" : undefined,
   win: {
     target: [
       { target: "nsis", arch: ["x64"] },
