@@ -7,13 +7,13 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { BoardError } from "./board.ts";
 import { handleMcp } from "./mcp.ts";
 import { compileApp, ensureRuntime, loadSource, RUNTIME_OUT } from "./apps.ts";
-import { claudeAuth, composeRequest, isClaude, isShell, requestTools, shellQuote } from "./agent.ts";
+import { claudeAuth, composeRequest, isClaude, isShell, programName, requestTools } from "./agent.ts";
 import { Library } from "./library.ts";
 import { BoardRegistry, type BoardRuntime } from "./boards.ts";
 import { BrowserService } from "./browser.ts";
 import { findChrome, noChromeMessage } from "./cdp.ts";
 import { startupNotes } from "./certs.ts";
-import { HumanSessions } from "./auth.ts";
+import { HumanSessions, sessionCookie } from "./auth.ts";
 import { CATALOG_DOC, type Actor } from "../shared/catalog.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,7 +24,8 @@ const DATA_DIR = resolve(process.env.WB_DATA_DIR ?? join(ROOT, "data"));
 const WORKSPACES = resolve(process.env.WB_WORKSPACES ?? join(ROOT, "workspaces"));
 const LIBRARY_FILE = resolve(process.env.WB_LIBRARY ?? join(DATA_DIR, "library.json"));
 const DIST = join(ROOT, "dist");
-const PROD = process.env.NODE_ENV === "production";
+// `npm start` passes --production (NODE_ENV=… before a command is POSIX-only); the desktop app sets NODE_ENV.
+const PROD = process.env.NODE_ENV === "production" || process.argv.includes("--production");
 
 const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const ALLOWED_ORIGINS = new Set([
@@ -37,12 +38,11 @@ const ALLOWED_ORIGINS = new Set([
 
 ensureRuntime();
 const library = new Library(LIBRARY_FILE);
-const HOOK_COMMAND = `"${process.execPath}" "${join(ROOT, "bin", "wb.mjs")}" hook`;
 // One headless Chrome (started on first use) behind every board's browser tools. Its profile lives in data/browser/.
 const browsers = new BrowserService(DATA_DIR);
 // Browsers paired with this server: the only requests that count as the person (see auth.ts).
-const humans = new HumanSessions(join(DATA_DIR, "browser-sessions.json"));
-const boards = new BoardRegistry({ dataDir: DATA_DIR, workspacesDir: WORKSPACES, serverUrl: SERVER_URL, binDir: join(ROOT, "bin"), hookCommand: HOOK_COMMAND, compile: compileApp, browsers });
+const humans = new HumanSessions(join(DATA_DIR, "browser-sessions.json"), sessionCookie(PORT));
+const boards = new BoardRegistry({ dataDir: DATA_DIR, workspacesDir: WORKSPACES, serverUrl: SERVER_URL, binDir: join(ROOT, "bin"), nodePath: process.execPath, compile: compileApp, browsers });
 
 // ── request guards ───────────────────────────────────────────────────────────
 // Blocks other websites (cross-site requests carry their Origin) and DNS rebinding (foreign Host).
@@ -70,12 +70,12 @@ function send(res: ServerResponse, status: number, data: unknown) {
   res.end(JSON.stringify(data));
 }
 
-async function readBody(req: IncomingMessage): Promise<any> {
+async function readBody(req: IncomingMessage, max = 2 * 1024 * 1024): Promise<any> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 2 * 1024 * 1024) throw new BoardError("request body too large", 413);
+    if (size > max) throw new BoardError("request body too large", 413);
     chunks.push(chunk);
   }
   if (!size) return undefined;
@@ -131,16 +131,13 @@ function sendToAgent(rt: BoardRuntime, prompt: string, toolIds: string[], lang: 
       { reason: "starting" },
     );
   if (isClaude(fg)) {
-    // Bracketed paste keeps line breaks inside Claude's input; Enter (a moment later) submits it.
-    rt.shell.write(`\x1b[200~${text}\x1b[201~`);
-    setTimeout(() => rt.shell.write("\r"), 150);
+    rt.typeIntoClaude(text);
     mode = "claude";
   } else if (isShell(fg)) {
-    rt.shell.write(`claude ${shellQuote(text)}\r`);
-    rt.markStarting();
+    rt.startClaude(text);
     mode = "started";
   } else {
-    const prog = fg.split("/").pop();
+    const prog = programName(fg);
     throw new BoardError(L(lang, `"${prog}" is running in the terminal, so this can't be sent. Try again when it finishes.`, `터미널에서 "${prog}"이(가) 실행 중이라 보낼 수 없습니다. 끝난 뒤 다시 보내세요.`), 409);
   }
   rt.board.logPrompt(prompt.trim(), toolIds);
@@ -259,7 +256,7 @@ const boardRoutes: BoardRoute[] = [
         claude: await claudeAuth(url.searchParams.get("refresh") === "1"),
         terminal: {
           running: rt.shell.running,
-          foreground: fg.split("/").pop() ?? "",
+          foreground: programName(fg),
           claudeRunning: isClaude(fg),
           agentState: rt.agentState(),
           loginRequired: rt.login.needed,
@@ -277,7 +274,7 @@ const boardRoutes: BoardRoute[] = [
       const fg = rt.shell.foreground();
       // Inside a running Claude the person signs in on its own screen (/login); typing there could pick a menu item.
       if (isClaude(fg)) return { mode: "claude" };
-      const prog = fg.split("/").pop();
+      const prog = programName(fg);
       if (!isShell(fg)) throw new BoardError(L(lang, `"${prog}" is running in the terminal. Try again when it finishes.`, `터미널에서 "${prog}"이(가) 실행 중입니다. 끝난 뒤 다시 시도하세요.`), 409);
       rt.shell.write("claude auth login\r");
       return { mode: "started" };
@@ -295,7 +292,14 @@ const boardRoutes: BoardRoute[] = [
   [
     "POST",
     /^\/agent\/hook$/,
-    ({ rt, body }) => {
+    ({ rt, body, res }) => {
+      // Claude Code's HTTP hooks POST the hook input as is (hook_event_name, notification_type, …). Their answer must be
+      // empty: a JSON body would be read as hook output. Older board workspaces still run `wb hook`, which sends {event}.
+      if (typeof body?.hook_event_name === "string") {
+        rt.onHook(body.hook_event_name, { notificationType: body.notification_type, message: body.message });
+        res.writeHead(204).end();
+        return;
+      }
       rt.onHook(String(body?.event ?? ""), { notificationType: body?.notificationType, message: body?.message });
       return { state: rt.agentState() };
     },
@@ -563,7 +567,8 @@ async function dispatch<C>(routes: [string, RegExp, (ctx: C) => unknown][], path
   for (const [method, re, handler] of routes) {
     const m = re.exec(path);
     if (!m || req.method !== method) continue;
-    const body = method === "GET" || method === "DELETE" ? undefined : await readBody(req);
+    // A hook's input carries the whole tool result (a file Claude read, say): far more than any other request.
+    const body = method === "GET" || method === "DELETE" ? undefined : await readBody(req, path === "/agent/hook" ? 64 * 1024 * 1024 : undefined);
     const result = await handler(make(m.slice(1), body));
     if (!res.headersSent && !res.writableEnded) send(res, 200, result);
     return true;
@@ -744,11 +749,32 @@ function attachBoard(rt: BoardRuntime, ws: WebSocket) {
   });
 }
 
+// The desktop app runs this server in an Electron utility process and talks to it over parentPort: it pairs its own
+// window, and shows pairing codes in a window (it has no console). Only the app's main process can reach parentPort.
+type ParentPort = { postMessage(msg: unknown): void; on(event: "message", fn: (e: { data: any }) => void): void };
+const parent = (process as unknown as { parentPort?: ParentPort }).parentPort;
+if (parent) {
+  humans.onCode = (code, expiresAt) => parent.postMessage({ type: "pairing-code", code, expiresAt });
+  parent.on("message", ({ data }) => {
+    if (data?.type === "app-session") parent.postMessage({ type: "app-session", ...humans.appSession() });
+    else if (data?.type === "status") parent.postMessage({ type: "status", claudeRunning: boards.list().filter((b) => b.claudeRunning).length });
+    else if (data?.type === "quit") shutdown();
+  });
+}
+
+server.on("error", (err: NodeJS.ErrnoException) => {
+  const message = err.code === "EADDRINUSE" ? `port ${PORT} is in use (another Shellside server?). Set WB_PORT to use another.` : err.message;
+  console.error(`[workboard] cannot start: ${message}`);
+  parent?.postMessage({ type: "error", code: err.code, message });
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
+  parent?.postMessage({ type: "ready", url: SERVER_URL });
   console.log(`[workboard] server  ${SERVER_URL}`);
   console.log(`[workboard] boards  ${boards.list().map((b) => `${b.name} (${b.id})`).join(", ")}`);
   console.log(`[workboard] MCP     ${SERVER_URL}/mcp/<boardId>`);
-  console.log(`[workboard] folders ${WORKSPACES}/<boardId>`);
+  console.log(`[workboard] folders ${join(WORKSPACES, "<boardId>")}`);
   console.log(PROD ? `[workboard] open    ${SERVER_URL}` : `[workboard] open    http://127.0.0.1:5173  (vite)`);
   // Say it now rather than when someone first adds a browser frame.
   if (!findChrome()) console.log(`[workboard] browser ${noChromeMessage()}`);
@@ -760,11 +786,10 @@ server.listen(PORT, HOST, () => {
 });
 
 let stopping = false;
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => {
-    if (stopping) process.exit(0); // asked twice: do not wait
-    stopping = true;
-    boards.disposeAll();
-    void browsers.dispose().finally(() => process.exit(0));
-  });
+function shutdown() {
+  if (stopping) process.exit(0); // asked twice: do not wait
+  stopping = true;
+  boards.disposeAll();
+  void browsers.dispose().finally(() => process.exit(0));
 }
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, shutdown);

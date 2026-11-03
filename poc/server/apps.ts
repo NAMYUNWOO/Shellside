@@ -1,8 +1,8 @@
 // App tools: agent-written React code. Compile on the server so the agent gets errors at once.
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildSync } from "esbuild";
 import { transform } from "sucrase";
 import { BoardError } from "./board.ts";
 
@@ -45,10 +45,12 @@ export function loadSource(workspace: string, input: { source?: string; sourcePa
   throw new BoardError("give the app code as source, or sourcePath to a .jsx/.tsx file in the workspace");
 }
 
-/** Bundle the sandbox runtime (React + board bridge) when missing or older than its source. */
+/** Bundle the sandbox runtime (React + board bridge) when missing or older than its source. The desktop app ships it
+ *  built and without its source, so there it is always fresh (and esbuild, loaded only to build, is not needed). */
 export function ensureRuntime() {
-  const fresh = existsSync(RUNTIME_OUT) && statSync(RUNTIME_OUT).mtimeMs >= statSync(RUNTIME_SRC).mtimeMs;
+  const fresh = existsSync(RUNTIME_OUT) && (!existsSync(RUNTIME_SRC) || statSync(RUNTIME_OUT).mtimeMs >= statSync(RUNTIME_SRC).mtimeMs);
   if (fresh) return;
+  const { buildSync } = createRequire(import.meta.url)("esbuild") as typeof import("esbuild");
   mkdirSync(dirname(RUNTIME_OUT), { recursive: true });
   buildSync({
     entryPoints: [RUNTIME_SRC],

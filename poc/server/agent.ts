@@ -1,5 +1,7 @@
 // The agent in the terminal: is Claude logged in, is it running, and how to hand it a request.
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import type { Tool } from "../shared/catalog.ts";
 import type { Board } from "./board.ts";
 
@@ -24,6 +26,12 @@ export function cleanEnv(base: NodeJS.ProcessEnv = process.env): Record<string, 
   return out;
 }
 
+/** The first folder on PATH that has this file, or null. */
+export function onPath(file: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  for (const dir of (env.PATH ?? env.Path ?? "").split(delimiter)) if (dir && existsSync(join(dir, file))) return join(dir, file);
+  return null;
+}
+
 let cache: { at: number; value: ClaudeAuth } | null = null;
 let inflight: Promise<ClaudeAuth> | null = null;
 
@@ -31,7 +39,9 @@ let inflight: Promise<ClaudeAuth> | null = null;
 export function claudeAuth(force = false): Promise<ClaudeAuth> {
   if (!force && cache && Date.now() - cache.at < 15_000) return Promise.resolve(cache.value);
   inflight ??= new Promise<ClaudeAuth>((resolve) => {
-    execFile("claude", ["auth", "status"], { timeout: 10_000, env: cleanEnv() }, (err, stdout) => {
+    // Windows: an npm install of Claude Code is claude.cmd, which only a shell can start (the native one is claude.exe).
+    const viaShell = process.platform === "win32" && !onPath("claude.exe") && !!onPath("claude.cmd");
+    execFile("claude", ["auth", "status"], { timeout: 10_000, env: cleanEnv(), shell: viaShell, windowsHide: true }, (err, stdout) => {
       let value: ClaudeAuth;
       if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") value = { installed: false, loggedIn: false };
       else {
@@ -92,10 +102,12 @@ export function loginSignal(text: string): { needed: boolean; hint?: string } | 
   return { needed: true, hint: LOGIN_NEEDED.exec(text)?.[1] };
 }
 
+/** The program's name without its folder or (Windows) .exe: "/bin/zsh" → "zsh", "C:\…\claude.exe" → "claude". */
+export const programName = (fg: string) => fg.split(/[\\/]/).pop()!.replace(/\.exe$/i, "");
 // The native installer links `claude` to ~/.local/share/claude/versions/<version>, so the terminal reports the
 // program as its version number (e.g. "2.1.312") instead of "claude".
-export const isClaude = (fg: string) => /(^|\/)(claude|\d+\.\d+\.\d+[\w.+-]*)$/.test(fg);
-export const isShell = (fg: string) => /(^|\/)-?(bash|zsh|sh|dash)$/.test(fg);
+export const isClaude = (fg: string) => /^(claude|\d+\.\d+\.\d+[\w.+-]*)$/i.test(programName(fg));
+export const isShell = (fg: string) => /^-?(bash|zsh|sh|dash|powershell|pwsh)$/i.test(programName(fg));
 
 /** The request as Claude will read it: which board tools it is about, then what to do. */
 /**

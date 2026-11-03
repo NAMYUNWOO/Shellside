@@ -2,12 +2,13 @@
 // workspace folder whose .mcp.json points at that board's MCP endpoint.
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { userInfo } from "node:os";
+import { delimiter, join, resolve } from "node:path";
 import type { WebSocket } from "ws";
 import { Board, BoardError } from "./board.ts";
 import { ShellSession } from "./pty.ts";
-import { prepareWorkspace, writeSessionKit } from "./workspace.ts";
-import { claudeAuth, cleanEnv, isClaude, loginSignal, stateAfterHook, type AgentState } from "./agent.ts";
+import { powershellArgs, prepareWorkspace, writeSessionKit } from "./workspace.ts";
+import { claudeAuth, cleanEnv, isClaude, isShell, loginSignal, shellQuote, stateAfterHook, type AgentState } from "./agent.ts";
 import { BoardBrowsers, type BrowserService } from "./browser.ts";
 
 export interface BoardMeta {
@@ -33,11 +34,49 @@ interface RegistryOptions {
   workspacesDir: string;
   serverUrl: string;
   binDir: string;
-  /** Command Claude Code hooks run to report state, e.g. `"node" ".../wb.mjs" hook`. */
-  hookCommand: string;
+  /** The program that runs bin/wb.mjs for the wb CLI: Node, or the desktop app's own runtime. */
+  nodePath: string;
   compile: (source: string) => string;
   /** The server's one headless Chrome, shared by every board's browser tools. */
   browsers: BrowserService;
+}
+
+const WINDOWS = process.platform === "win32";
+
+/**
+ * The board terminal's shell: WB_SHELL, else PowerShell on Windows and the person's login shell elsewhere. bash gets our
+ * rcfile, which loads the normal login setup and then wraps `claude` so the board follows you to any folder.
+ * PowerShell (5.1, or 7 as pwsh) loads the person's profile and then the same wrapper. Other shells start as login shells.
+ */
+function boardShell(bashrc: string): { shell: string; args: string[]; powershell: boolean } {
+  let login = "";
+  try {
+    if (!WINDOWS) login = userInfo().shell ?? "";
+  } catch {}
+  // Started from the Dock or Finder, an app may get no SHELL: then the account's login shell.
+  const shell = process.env.WB_SHELL || (WINDOWS ? "powershell.exe" : process.env.SHELL || login || "/bin/bash");
+  if (/(^|[\\/])(powershell|pwsh)(\.exe)?$/i.test(shell)) return { shell, args: powershellArgs(), powershell: true };
+  return { shell, args: /(^|\/)bash$/.test(shell) ? ["--rcfile", bashrc, "-i"] : ["-l"], powershell: false };
+}
+
+/**
+ * This process's env for a board terminal (see cleanEnv), with bin/ (the wb CLI) first on PATH. Windows calls the
+ * variable "Path"; a second "PATH" key next to it would leave it unclear which one a program gets. Local addresses
+ * never go through a proxy: Claude Code reaches the board's MCP endpoint and hooks there.
+ */
+function terminalEnv(binDir: string) {
+  const env = cleanEnv();
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+  env[pathKey] = [binDir, env[pathKey]].filter(Boolean).join(delimiter);
+  if (Object.keys(env).some((k) => /^(https?|all)_proxy$/i.test(k))) {
+    // Windows names are case-insensitive: one key there. Elsewhere programs read either spelling.
+    const keys = WINDOWS ? [Object.keys(env).find((k) => /^no_proxy$/i.test(k)) ?? "NO_PROXY"] : ["NO_PROXY", "no_proxy"];
+    for (const key of keys) {
+      const have = (env[key] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      env[key] = [...new Set([...have, "127.0.0.1", "localhost"])].join(",");
+    }
+  }
+  return env;
 }
 
 /** One board, its shell and the browser tabs watching it. */
@@ -59,19 +98,24 @@ export class BoardRuntime {
     opts: RegistryOptions,
   ) {
     const mcpUrl = `${opts.serverUrl}/mcp/${meta.id}`;
-    prepareWorkspace(meta.workspace, mcpUrl, opts.hookCommand);
-    const kit = writeSessionKit(join(opts.dataDir, "sessions", meta.id), mcpUrl, opts.hookCommand);
+    const hookUrl = `${opts.serverUrl}/api/b/${meta.id}/agent/hook`;
+    const sessionDir = join(opts.dataDir, "sessions", meta.id);
+    prepareWorkspace(meta.workspace, mcpUrl, hookUrl);
+    const kit = writeSessionKit(sessionDir, mcpUrl, hookUrl);
     this.board = new Board(join(opts.dataDir, "boards", `${meta.id}.json`), opts.compile);
     this.browsers = new BoardBrowsers(opts.browsers, meta.id, this.board, meta.workspace);
-    const shellPath = process.env.SHELL ?? "/bin/bash";
-    const isBash = /(^|\/)bash$/.test(shellPath);
+    const { shell, args, powershell } = boardShell(kit.bashrc);
+    this.powershell = powershell;
+    const fgFile = powershell ? join(sessionDir, "foreground") : undefined;
     this.shell = new ShellSession({
       cwd: meta.workspace,
-      shell: shellPath,
-      // bash: our rcfile loads the normal login setup, then wraps `claude` so the board follows you to any folder.
-      args: isBash ? ["--rcfile", kit.bashrc, "-i"] : ["-l"],
+      shell,
+      args,
+      foregroundFile: fgFile,
       env: {
-        ...cleanEnv(),
+        ...terminalEnv(opts.binDir),
+        WB_NODE: opts.nodePath,
+        ...(fgFile ? { WB_FG: fgFile } : {}),
         WB_WORKSPACE: meta.workspace,
         WB_BIN: opts.binDir,
         WB_MCP_CONFIG: kit.mcpConfig,
@@ -81,7 +125,6 @@ export class BoardRuntime {
         COLORTERM: "truecolor",
         WB_URL: opts.serverUrl,
         WB_BOARD: meta.id,
-        PATH: `${opts.binDir}:${process.env.PATH ?? ""}`,
         // Long waits on board_ask are expected; keep the agent's MCP client from giving up early.
         MCP_TOOL_TIMEOUT: process.env.MCP_TOOL_TIMEOUT ?? "900000",
       },
@@ -99,14 +142,45 @@ export class BoardRuntime {
     });
     // When Claude leaves the foreground, forget its last state: a new session is not ready until SessionStart.
     this.watch = setInterval(() => {
-      if (this.hook.state !== "starting" && !isClaude(this.shell.foreground())) this.hook = { state: "starting", at: new Date().toISOString() };
+      const fg = this.shell.foreground();
+      if (this.hook.state !== "starting" && !isClaude(fg)) this.hook = { state: "starting", at: new Date().toISOString() };
+      if (this.pendingPrompt && (isShell(fg) || Date.now() > this.pendingPrompt.until)) this.pendingPrompt = null; // that Claude is gone
     }, 1000);
     this.watch.unref();
+  }
+
+  /** The terminal runs PowerShell (always on Windows). */
+  private readonly powershell: boolean;
+  /** PowerShell: a request for the Claude we just started bare, typed in once it is ready (see startClaude). */
+  private pendingPrompt: { text: string; until: number } | null = null;
+
+  /** Start Claude in the terminal (a shell is in the foreground) with a request as its first prompt. */
+  startClaude(text: string) {
+    this.markStarting();
+    if (!this.powershell) return this.shell.write(`claude ${shellQuote(text)}\r`);
+    // Windows PowerShell 5.1 mangles double quotes in arguments to programs: start Claude bare, and paste the request
+    // when SessionStart says it is up (a trust prompt first just makes it wait).
+    this.pendingPrompt = { text, until: Date.now() + 5 * 60_000 };
+    this.shell.write("claude\r");
+  }
+
+  /** Bracketed paste keeps line breaks inside Claude's input; Enter (a moment later) submits it. */
+  typeIntoClaude(text: string) {
+    this.shell.write(`\x1b[200~${text}\x1b[201~`);
+    setTimeout(() => this.shell.write("\r"), 150);
   }
 
   onHook(event: string, info: { notificationType?: string; message?: string }) {
     const next = stateAfterHook(event, info);
     if (next) this.hook = { state: next, at: new Date().toISOString() };
+    if (event === "SessionStart" && this.pendingPrompt) {
+      const { text } = this.pendingPrompt;
+      this.pendingPrompt = null;
+      // SessionStart comes a moment before Claude's input box takes keys.
+      setTimeout(() => {
+        if (isClaude(this.shell.foreground())) this.typeIntoClaude(text);
+      }, 1500);
+    }
     // Claude taking prompts or finishing turns means it is signed in.
     if (event === "UserPromptSubmit" || event === "Stop" || event === "PostToolUse") this.login = { needed: false };
   }

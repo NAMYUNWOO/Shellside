@@ -1,5 +1,6 @@
 // One shared shell for the PoC. It outlives browser reconnects and replays recent output.
 import * as pty from "node-pty";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const REPLAY_LIMIT = 512 * 1024; // bytes of recent output kept for reconnecting tabs
 
@@ -9,6 +10,8 @@ export interface PtyOptions {
   shell?: string;
   /** Defaults to a login shell (-l). */
   args?: string[];
+  /** Windows: the file the shell writes the foreground program's name to (node-pty can't tell there). */
+  foregroundFile?: string;
 }
 
 type Listener = (data: Buffer) => void;
@@ -35,6 +38,8 @@ export class ShellSession {
     const shell = this.opts.shell ?? process.env.SHELL ?? "/bin/bash";
     this.replay = [];
     this.replayBytes = 0;
+    // A new shell writes its own name here once it is up; until then nothing is known to run.
+    if (this.opts.foregroundFile) writeFileSync(this.opts.foregroundFile, "");
     const proc = pty.spawn(shell, this.opts.args ?? ["-l"], {
       name: "xterm-256color",
       cols,
@@ -77,10 +82,12 @@ export class ShellSession {
     return () => this.exitListeners.delete(fn);
   }
 
-  /** Name of the program in the foreground of the terminal, e.g. "/bin/bash" or "claude". */
+  /** Name of the program in the foreground of the terminal, e.g. "/bin/bash", "claude" or (Windows) "powershell". */
   foreground(): string {
     try {
-      return this.proc?.process ?? "";
+      if (!this.proc) return "";
+      if (this.opts.foregroundFile) return readFileSync(this.opts.foregroundFile, "utf8").trim();
+      return this.proc.process ?? "";
     } catch {
       return "";
     }

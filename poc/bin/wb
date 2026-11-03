@@ -1,1 +1,4 @@
-wb.mjs
+#!/bin/sh
+# wb: the board from the shell (see wb.mjs). Board terminals set WB_NODE to the runtime that runs it: Node, or the
+# Shellside app's own (ELECTRON_RUN_AS_NODE makes the app's binary act as Node; Node ignores it).
+ELECTRON_RUN_AS_NODE=1 exec "${WB_NODE:-node}" "$(dirname "$0")/wb.mjs" "$@"
