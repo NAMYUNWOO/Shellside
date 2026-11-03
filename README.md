@@ -136,7 +136,8 @@ opens in its own window; there is nothing to start from a terminal or PowerShell
 | Windows 10/11 (x64) | `Shellside-Setup-<version>-x64.exe` (or the `.zip`, which runs without installing) |
 
 You still need [Claude Code](https://code.claude.com/docs/en/setup) installed and signed in, and Chrome for the board
-browser (Edge, which Windows has, works too). The builds aren't code-signed yet, so the first open takes one more step:
+browser (Edge, which Windows has, works too). Builds are being moved to signed releases (see
+[Code signing policy](#code-signing-policy)). Until a release is signed, the first open takes one more step:
 
 - **macOS:** open the app once and close the warning, then System Settings → Privacy & Security → **Open Anyway**.
 - **Windows:** when SmartScreen says "Windows protected your PC", choose **More info** → **Run anyway**.
@@ -186,6 +187,20 @@ Shellside runs a real shell for every board, so treat it like one.
   certificate warnings. On a network that inspects HTTPS, see
   [Networks that inspect HTTPS](poc/README.md#networks-that-inspect-https).
 - `poc/data/` and `poc/workspaces/` hold your boards, uploaded files and session files. They are git-ignored; never commit them.
+
+## Code signing policy
+
+- **Windows:** free code signing provided by [SignPath.io](https://signpath.io), certificate by
+  [SignPath Foundation](https://signpath.org). Releases are built from this repository by GitHub Actions on
+  GitHub-hosted runners ([desktop.yml](.github/workflows/desktop.yml)), and only those builds are submitted for signing.
+- **macOS:** signed with the Developer ID of NAM YUNWOO and notarized by Apple.
+- **Team:** committers and reviewers: [NAMYUNWOO](https://github.com/NAMYUNWOO); approvers (each release signing
+  request): [NAMYUNWOO](https://github.com/NAMYUNWOO). Changes from anyone else are reviewed before they are merged.
+- **Privacy:** this program will not transfer any information to other networked systems unless specifically requested
+  by the user or the person installing or operating it. Shellside's server listens only on `127.0.0.1`. What leaves the
+  machine is what you (or Claude, at your request) do: Claude Code, which you install and sign in to yourself, talks
+  to Anthropic under [Anthropic's privacy policy](https://www.anthropic.com/legal/privacy), and the board browser
+  opens the pages asked for, in the Chrome installed on the machine.
 
 ## Repository layout
 

@@ -59,9 +59,9 @@ asks first when Claude is running). Download it from
   6 s, it uses `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` instead. macOS may ask whether Shellside may
   access a folder your profile or Claude reads, as it does for any terminal app.
 - **The `wb` CLI** in its terminals runs on the app's own runtime (`WB_NODE`); no separate Node.js is needed.
-- **Not code-signed yet:** macOS builds carry only an ad-hoc signature and are not notarized, and Windows builds are
-  unsigned, so the first open shows a warning (see the [Quick start](../README.md#desktop-app-macos-windows)). On macOS
-  you can instead clear the download flag: `xattr -dr com.apple.quarantine /Applications/Shellside.app`.
+- **Signing:** see [Code signing](#code-signing). A build without signatures (macOS: ad-hoc only, not notarized;
+  Windows: unsigned) shows a warning on first open (see the [Quick start](../README.md#desktop-app-macos-windows)). On
+  macOS you can instead clear the download flag: `xattr -dr com.apple.quarantine /Applications/Shellside.app`.
 - **Build it:** on the system you build for,
 
   ```bash
@@ -73,8 +73,49 @@ asks first when Claude is running). Download it from
 
   `build.mjs` stages the UI, the app sandbox runtime, the server bundled into one file (with its third-party notices,
   `server/third-party-licenses.md`), the `wb` CLI and node-pty's prebuilt binaries; electron-builder
-  (`electron-builder.yml`) packages them. CI (`.github/workflows/desktop.yml`) builds both on every push, runs each
-  build once (`SHELLSIDE_SMOKE`), and a `v*` tag puts the builds on a draft release.
+  (`electron-builder.config.cjs`) packages them. CI (`.github/workflows/desktop.yml`) builds both on every push, runs
+  each build once (`SHELLSIDE_SMOKE`), and a `v*` tag puts the builds on a draft release.
+
+### Code signing
+
+The policy is in the [README](../README.md#code-signing-policy). Without the credentials below, builds come out
+unsigned and everything else works the same.
+
+**macOS** (Developer ID + notarization; needs the paid Apple Developer Program, and the Account Holder makes the
+certificate):
+
+1. Xcode → Settings → Accounts → your team → **Manage Certificates…** → **+** → **Developer ID Application**.
+   With it in the login keychain, `npm run dist` on that Mac signs with it (`SHELLSIDE_SIGN=0` skips signing).
+2. App Store Connect → Users and Access → Integrations → **Team Keys** → **+** (access: Developer). Download the
+   `AuthKey_<id>.p8` (only once) and note the key ID and the issuer ID. Locally, notarization runs when
+   `APPLE_API_KEY` (path of the .p8), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER` are set.
+3. For CI, export the certificate from Keychain Access (My Certificates → Developer ID Application → Export, with a
+   password) and add the repository secrets:
+
+   ```bash
+   base64 -i DeveloperID.p12 | gh secret set MAC_CERT_P12
+   gh secret set MAC_CERT_PASSWORD             # the export password
+   gh secret set APPLE_API_KEY_P8 < AuthKey_<id>.p8
+   gh secret set APPLE_API_KEY_ID --body <key id>
+   gh secret set APPLE_API_ISSUER --body <issuer id>
+   ```
+
+**Windows** (SignPath Foundation, free for open source; every release signing request is approved by hand):
+
+1. Apply at [signpath.org/apply](https://signpath.org/apply). The project must already be released, and the README's
+   code signing policy must be in place.
+2. Once accepted, in SignPath: add the GitHub.com trusted build system, a project with the slug `shellside`, the
+   artifact configurations `app` and `installer` from [`desktop/signpath/`](desktop/signpath), and a signing policy
+   (`release-signing`, or set `SIGNPATH_POLICY_SLUG`). Make an API token for a CI user who may submit requests.
+3. Add to the repository:
+
+   ```bash
+   gh variable set SIGNPATH_ORGANIZATION_ID --body <organization id>
+   gh secret set SIGNPATH_API_TOKEN
+   ```
+
+   From then on, a `v*` tag builds the app unpacked, has SignPath sign `Shellside.exe`, builds the installer and the
+   .zip from the signed app, has the installer signed, and puts those on the draft release. Branch builds stay unsigned.
 
 ## Screen
 
@@ -282,7 +323,8 @@ web/TerminalPane.tsx The only file that knows about wterm (the point to swap or 
 bin/wb, wb.cmd, wb.mjs  The wb CLI (sh and cmd wrappers around wb.mjs)
 test/terminal-check.mjs End-to-end check of a board terminal on this OS, with a fake claude (CI runs it on all three)
 desktop/main.mjs     Desktop app: starts the server in a utility process, the window, menus, pairing codes
-desktop/build.mjs    Stages the desktop app for electron-builder (electron-builder.yml)
+desktop/build.mjs    Stages the desktop app for electron-builder (electron-builder.config.cjs)
+desktop/signpath/    SignPath artifact configurations for signing the Windows app and installer
 ```
 
 ## Data

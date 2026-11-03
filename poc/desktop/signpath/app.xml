@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration "app": the unpacked Windows app (release/win-unpacked, uploaded as a zip by CI).
+     Signs Shellside.exe, the program people start. Electron's and node-pty's own DLLs and helpers come from upstream
+     and stay as they ship. The installer is built from these files afterwards and signed with installer.xml.
+     CI passes the app's version (desktop/package.json) as the "version" parameter. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="Shellside.exe" product-name="Shellside" product-version="${version}">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

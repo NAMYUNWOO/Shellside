@@ -1,4 +1,4 @@
-// Stages the Shellside desktop app in desktop/stage for electron-builder (electron-builder.yml): the board UI, the app
+// Stages the Shellside desktop app in desktop/stage for electron-builder (electron-builder.config.cjs): the board UI, the app
 // sandbox runtime, the server bundled into one file with its open source notices, the wb CLI, and node-pty (native,
 // so it ships as its package, with the prebuilt binaries for this platform only). Run on the platform you build for.
 import { execSync } from "node:child_process";
