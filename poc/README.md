@@ -137,12 +137,31 @@ certificate):
 | Area | What it does |
 | --- | --- |
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
-| Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). Select tool (V): drag on empty space = select several (box). Hand tool (H): drag anywhere = pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Wheel / pinch = zoom (a scroll that starts over a browser page scrolls the page), Shift+wheel / Space+drag / middle button = pan, drag the name label = move, drag the right edge = width (a browser frame: its sides and bottom corners) |
-| **Right-click menu** | Send to Claude… (⌘↵) · Zoom to fit · Rename · Save to library… · Copy name · Copy ID · Duplicate · Agent access · Delete. Right-click empty space = + Note here / + Checklist here / + Browser here |
+| Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). It works like Figma: Move tool (V) = an arrow; click a frame to select it, drag its name label or its edge to move it, drag on empty space to select several (box), Shift+click to add. Hand tool (H), or hold Space, = drag anywhere to pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Scroll / two-finger scroll = pan (a scroll that starts over a browser page scrolls the page), ⌘/Ctrl+scroll or pinch = zoom at the pointer, middle-button drag = pan. Drag the right edge = width (a browser frame: its sides and bottom corners); double-click the name = rename |
+| **Right-click menu** | Send to Claude… · Zoom to selection · Rename · Save to library… · Copy name · Copy ID · Copy · Duplicate · Agent access · Delete, each with its shortcut. Right-click empty space = + Note / + Checklist / + Browser here, Paste here |
+| **Zoom menu** (the % at the top) | Zoom in / out, to fit, to the selection, 50 / 100 / 200 %, minimap, properties panel, keyboard shortcuts |
 | Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Shellside mark (a nautilus shell) inside the button while Claude runs in this board's terminal, and `!` when a permission prompt is waiting |
 | Bottom: **Input box** | Sends straight to Claude, with the selected components attached as context. `@` suggests components by name; the ones you name are attached too |
 | **Library** | Saved components. Click one or drag it onto the canvas to reuse it |
+
+## Keyboard shortcuts
+
+Press **?** on the board for the full list. ⌘ on macOS is Ctrl on Windows; letter keys work with a Korean input
+method on too.
+
+| | |
+| --- | --- |
+| Tools | V move · H hand · Space (held) pan · L link · N note · C checklist · B browser (N and C put it under the pointer) |
+| View | ⌘/Ctrl + = / − zoom · ⇧0 100% · ⇧1 fit all · ⇧2 fit the selection · ⌘/Ctrl+\ properties panel |
+| Edit | ⌘/Ctrl+Z undo · ⇧⌘Z / Ctrl+Y redo · ⌘/Ctrl+C, X, V copy, cut, paste (frames; the clipboard gets their @names) · ⌘/Ctrl+D duplicate · arrows move 1 (⇧ 10) · Delete · ⌘/Ctrl+A select all · Esc deselect |
+| Frames | Enter = edit the selected frame (its first field) · Esc = stop editing and select it · double-click the name = rename |
+| Claude | / = the input box · ⌘/Ctrl+Enter = send the selection · Ctrl+` = terminal |
+
+Undo covers what you do on the canvas (move, resize, add, duplicate, paste, delete, rename), not the agent's edits.
+Delete takes effect at once, as in Figma, and ⌘/Ctrl+Z brings the frames back with their names, content and links
+(with new ids). In the desktop app, the Edit menu's Undo, Redo and Select All act on the board the same way, and
+⌘/Ctrl + = − 0 zoom the board, not the window.
 
 ## Language
 

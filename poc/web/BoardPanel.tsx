@@ -5,17 +5,27 @@ import type { Link, LinkDirection, Tool } from "../shared/catalog.ts";
 import { useApi, ApiError, loginProblem, type AgentStatus } from "./api.ts";
 import { ShellsideMark } from "./ShellsideMark.tsx";
 import { AskCard } from "./Asks.tsx";
-import { BoardCanvas, useCanvasActions, type CanvasTool } from "./Canvas.tsx";
+import { BoardCanvas, useCanvasActions, type CanvasTool, type LayoutChange } from "./Canvas.tsx";
 import { ContextMenu, type MenuItem } from "./ContextMenu.tsx";
 import { SaveToLibraryDialog, SendToClaudeDialog } from "./Dialogs.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { LibraryPanel } from "./Library.tsx";
 import { LiveProvider } from "./live.ts";
 import { useBoard, useNow } from "./useBoard.ts";
-import { useT, type T } from "./i18n.tsx";
+import { useT } from "./i18n.tsx";
+import { isMod, kbd } from "./keys.ts";
+import { ShortcutsDialog } from "./Shortcuts.tsx";
 
 const isEditable = (el: Element | null) =>
   !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
+/** Keys belong to something else: a text field, the terminal, a browser page, an open menu or dialog. */
+const keysTaken = () => {
+  const el = document.activeElement;
+  return isEditable(el) || !!el?.closest(".term-window, .browser-page") || !!document.querySelector('[role="menu"], .modal');
+};
+
+/** Frames copied with ⌘/Ctrl+C, for pasting on any board in this window. The clipboard gets their @names as text. */
+let copied: { tools: Tool[]; text: string } | null = null;
 
 interface BoardPanelProps {
   boardId: string;
@@ -73,6 +83,13 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   const [inspectorOpen, setInspectorOpen] = usePersistent("wb.inspectorOpen", true);
   const [minimap, setMinimap] = usePersistent("wb.minimap", false);
   const [tool, setTool] = usePersistent<CanvasTool>("wb.tool", "select");
+  const [spaceHeld, setSpaceHeld] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [zoomMenu, setZoomMenu] = useState<{ x: number; y: number } | null>(null);
+  const pointer = useRef<{ x: number; y: number } | null>(null);
+  const onPointer = useCallback((p: { x: number; y: number } | null) => (pointer.current = p), []);
+  /** Where new frames go: under the pointer when it is on the canvas, else the middle of the view. */
+  const dropPoint = useCallback(() => (pointer.current ? rf.screenToFlowPosition(pointer.current) : cam.center()), [rf, cam]);
   const [menu, setMenu] = useState<Menu | null>(null);
   const [linkMenu, setLinkMenu] = useState<{ x: number; y: number; linkId: string } | null>(null);
   const [selectedLinkIds, setSelectedLinkIds] = useState<string[]>([]);
@@ -151,21 +168,121 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   );
   const fitTo = useCallback((ids: string[]) => rf.fitView({ nodes: ids.map((id) => ({ id })), duration: 300, padding: 0.2, maxZoom: 1 }), [rf]);
 
+  // ── Undo / redo (⌘/Ctrl+Z, ⇧⌘Z / Ctrl+Y), as in Figma: what the person does on the canvas (move, resize, add,
+  // duplicate, paste, delete, rename). Not the agent's edits. A frame brought back gets a new id; `alias` maps the old
+  // one to it, so older steps still find it.
+  type Step = { label: string; undo: () => Promise<void>; redo: () => Promise<void> };
+  const history = useRef<{ done: Step[]; undone: Step[]; alias: Map<string, string> }>({ done: [], undone: [], alias: new Map() });
+  const toolsRef = useRef(toolsById);
+  toolsRef.current = toolsById;
+  const linksRef = useRef(links);
+  linksRef.current = links;
+  const resolve = (id: string) => {
+    const seen = new Set<string>();
+    while (history.current.alias.has(id) && !seen.has(id)) seen.add(id), (id = history.current.alias.get(id)!);
+    return id;
+  };
+  const record = (step: Step) => {
+    const h = history.current;
+    h.done.push(step);
+    if (h.done.length > 100) h.done.shift();
+    h.undone = [];
+  };
+  /** Copies of what is about to go, for bringing it back: the tools and the links that touch them. */
+  const snapshot = (ids: string[]) => {
+    const set = new Set(ids);
+    return {
+      tools: ids.map((id) => toolsRef.current[id]).filter(Boolean).map((tl) => structuredClone(tl)) as Tool[],
+      links: linksRef.current.filter((l) => set.has(l.from) || set.has(l.to)).map((l) => ({ ...l })),
+    };
+  };
+  /** Make deleted tools again, where they were, with their name, content and links. */
+  const recreate = async (snap: { tools: Tool[]; links: Link[] }) => {
+    for (const s of snap.tools) {
+      const input = {
+        kind: s.kind,
+        title: s.title,
+        description: s.description,
+        props: s.props,
+        state: s.state,
+        ...(s.layout ? { width: s.layout.w, at: { x: s.layout.x + s.layout.w / 2, y: s.layout.y + 80 } } : {}),
+      };
+      const made = await api.createTool({ ...input, name: s.name }).catch(() => api.createTool(input));
+      history.current.alias.set(s.id, made.id);
+      if (s.layout) await api.setLayout(made.id, { x: s.layout.x, y: s.layout.y, w: s.layout.w, ...(s.layout.h ? { h: s.layout.h } : {}) }).catch(() => {});
+      if (s.agentAccess === "read") await api.updateTool(made.id, { agentAccess: "read" }).catch(() => {});
+    }
+    for (const l of snap.links) await api.createLink(resolve(l.from), resolve(l.to), l.direction).catch(() => {});
+    return snap.tools.map((s) => resolve(s.id));
+  };
+  const removeNow = async (ids: string[]) => {
+    for (const id of ids) await api.deleteTool(resolve(id)).catch(() => {});
+  };
+  /** The person made these tools (add, duplicate, paste, library): undo removes them. */
+  const recordCreate = (ids: string[], label: string) => {
+    let snap: { tools: Tool[]; links: Link[] } | null = null;
+    record({
+      label,
+      undo: async () => {
+        snap = snapshot(ids.map(resolve));
+        await removeNow(ids);
+      },
+      redo: async () => {
+        if (snap) await recreate(snap);
+      },
+    });
+  };
+  const runHistory = async (which: "undo" | "redo") => {
+    const h = history.current;
+    const step = (which === "undo" ? h.done : h.undone).pop();
+    if (!step) return onNotice(which === "undo" ? t("Nothing to undo", "되돌릴 작업이 없습니다") : t("Nothing to redo", "다시 할 작업이 없습니다"));
+    try {
+      await step[which]();
+      (which === "undo" ? h.undone : h.done).push(step);
+      onNotice(which === "undo" ? t(`Undo: ${step.label}`, `되돌림: ${step.label}`) : t(`Redo: ${step.label}`, `다시 함: ${step.label}`));
+    } catch (err) {
+      onNotice((err as Error).message);
+    }
+  };
+  const onCommit = useCallback((changes: LayoutChange[]) => {
+    const set = (key: "before" | "after") => async () => {
+      for (const c of changes) await api.setLayout(resolve(c.id), c[key]).catch(() => {});
+    };
+    record({ label: changes.some((c) => "w" in c.after) ? t("Resize", "크기 조절") : t("Move", "이동"), undo: set("before"), redo: set("after") });
+  }, [api, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  const onRename = useCallback((id: string, title: string) => {
+    const before = toolsRef.current[id]?.title ?? "";
+    const apply = (to: string) => () => api.updateTool(resolve(id), { title: to }).then(() => {});
+    void apply(title)().catch((err) => onNotice(err.message));
+    record({ label: t("Rename", "이름 바꾸기"), undo: apply(before), redo: apply(title) });
+  }, [api, t, onNotice]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Delete at once, as Figma does; ⌘/Ctrl+Z brings the frames back (with their links). */
   const removeTools = useCallback(
     async (ids: string[]) => {
-      const names = ids.map((id) => toolsById[id]?.title).filter(Boolean);
-      const question = ids.length === 1 ? t(`Delete "${names[0]}"?`, `"${names[0]}" 도구를 삭제할까요?`) : t(`Delete ${ids.length} tools?`, `${ids.length}개 도구를 삭제할까요?`);
-      if (!names.length || !confirm(question)) return;
-      for (const id of ids) await api.deleteTool(id).catch((err) => onNotice(err.message));
+      const snap = snapshot(ids);
+      if (!snap.tools.length) return;
+      await removeNow(ids);
+      record({ label: t("Delete", "삭제"), undo: async () => void (await recreate(snap)), redo: () => removeNow(snap.tools.map((tl) => tl.id)) });
+      onNotice(
+        snap.tools.length === 1
+          ? t(`Deleted "${snap.tools[0].title}" · ${kbd("mod+z")} to undo`, `"${snap.tools[0].title}" 삭제함 · ${kbd("mod+z")}로 되돌리기`)
+          : t(`Deleted ${snap.tools.length} frames · ${kbd("mod+z")} to undo`, `프레임 ${snap.tools.length}개 삭제함 · ${kbd("mod+z")}로 되돌리기`),
+      );
     },
-    [toolsById, onNotice, api, t],
+    [onNotice, api, t], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  const duplicate = async (ids: string[]) => {
+  /** New copies of these tools. at: where the group's top-left goes (default: 48 down and right of the originals). */
+  const copyTools = async (sources: Tool[], at?: { x: number; y: number }) => {
+    const placed = sources.filter((s) => s.layout);
+    if (!placed.length) return;
+    const minX = Math.min(...placed.map((s) => s.layout!.x));
+    const minY = Math.min(...placed.map((s) => s.layout!.y));
+    const dx = at ? at.x - minX : 48;
+    const dy = at ? at.y - minY : 48;
     const made: string[] = [];
-    for (const id of ids) {
-      const src = toolsById[id];
-      if (!src?.layout) continue;
+    for (const src of placed) {
       const { sourcePath: _keep, ...props } = src.props ?? {};
       try {
         const copy = await api.createTool({
@@ -174,16 +291,20 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
           description: src.description,
           props: src.kind === "app" ? { ...props, sourcePath: src.props.sourcePath } : src.props,
           state: src.state,
-          width: src.layout.w,
-          at: { x: src.layout.x + 48 + src.layout.w / 2, y: src.layout.y + 48 + 80 },
+          width: src.layout!.w,
+          at: { x: src.layout!.x + dx + src.layout!.w / 2, y: src.layout!.y + dy + 80 },
         });
         made.push(copy.id);
       } catch (err) {
         onNotice((err as Error).message);
       }
     }
-    if (made.length) setSelectedIds(made);
+    if (made.length) {
+      setSelectedIds(made);
+      recordCreate(made, at ? t("Paste", "붙여넣기") : t("Duplicate", "복제"));
+    }
   };
+  const duplicate = (ids: string[]) => copyTools(ids.map((id) => toolsById[id]).filter(Boolean) as Tool[]);
 
   const addTool = async (kind: "note" | "checklist" | "browser", at = cam.center()) => {
     try {
@@ -195,6 +316,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
             : { kind, title: t("Checklist", "체크리스트"), state: { items: [] }, at },
       );
       setSelectedIds([created.id]);
+      recordCreate([created.id], t("Add", "추가"));
       if (kind === "browser") window.setTimeout(() => cam.focusTool(created.id), 80);
     } catch (err) {
       onNotice((err as Error).message);
@@ -205,45 +327,126 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     try {
       const created = await api.useTemplate(id, at);
       setSelectedIds([created.id]);
+      recordCreate([created.id], t("Add from library", "라이브러리에서 추가"));
     } catch (err) {
       onNotice((err as Error).message);
     }
   };
 
-  // Figma-ish shortcuts (never while typing or inside the terminal window; only on the board on screen).
+  // Figma's shortcuts (see Shortcuts.tsx for the list). Only on the board on screen, and never while a text field, the
+  // terminal, a browser page, a menu or a dialog has the keys. Letters match the physical key (e.code), so they work
+  // with a Korean input method on too.
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      if (isEditable(document.activeElement) || document.activeElement?.closest(".term-window")) return;
-      if (e.shiftKey && e.code === "Digit1") {
-        e.preventDefault();
-        cam.fitAll();
-      } else if (e.shiftKey && e.code === "Digit0") {
-        e.preventDefault();
-        cam.zoomTo(1);
-      } else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "v") {
-        setTool("select");
-      } else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "h") {
-        setTool("hand");
-      } else if (!e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "l") {
-        setTool("link");
+      const el = document.activeElement;
+      // Esc while editing inside a frame: stop editing and select that frame (as leaving a text in Figma).
+      if (e.key === "Escape" && isEditable(el) && el?.closest(".react-flow__node") && !document.querySelector('[role="menu"], .modal')) {
+        const id = el.closest(".react-flow__node")?.getAttribute("data-id");
+        (el as HTMLElement).blur();
+        if (id) setSelectedIds([id]);
+        return;
+      }
+      if (keysTaken() || e.isComposing) return;
+      const mod = isMod(e);
+      const plain = !mod && !e.altKey && !e.ctrlKey && !e.metaKey;
+      const code = e.code;
+      const take = () => e.preventDefault();
+      if (code === "Space" && plain) {
+        take(); // no page scroll or button press; React Flow pans while it is held
+        if (!e.repeat) setSpaceHeld(true);
+      } else if (plain && !e.shiftKey && code === "KeyV") setTool("select");
+      else if (plain && !e.shiftKey && code === "KeyH") setTool("hand");
+      else if (plain && !e.shiftKey && code === "KeyL") setTool("link");
+      else if (plain && !e.shiftKey && code === "KeyN") (take(), addTool("note", dropPoint()));
+      else if (plain && !e.shiftKey && code === "KeyC") (take(), addTool("checklist", dropPoint()));
+      else if (plain && !e.shiftKey && code === "KeyB") (take(), addTool("browser"));
+      else if (plain && e.shiftKey && code === "Digit0") (take(), cam.zoomTo(1));
+      else if (plain && e.shiftKey && code === "Digit1") (take(), cam.fitAll());
+      else if (plain && e.shiftKey && code === "Digit2") (take(), selectedIds.length ? fitTo(selectedIds) : cam.fitAll());
+      else if (mod && (code === "Equal" || code === "NumpadAdd")) (take(), cam.zoomIn());
+      else if (mod && (code === "Minus" || code === "NumpadSubtract")) (take(), cam.zoomOut());
+      else if (mod && code === "Digit0") (take(), cam.zoomTo(1));
+      else if (mod && !e.shiftKey && code === "KeyZ") (take(), runHistory("undo"));
+      else if ((mod && e.shiftKey && code === "KeyZ") || (e.ctrlKey && !e.metaKey && code === "KeyY")) (take(), runHistory("redo"));
+      else if (mod && !e.shiftKey && code === "KeyA") (take(), setSelectedIds(tools.map((tl) => tl.id)));
+      else if (mod && !e.shiftKey && code === "KeyD" && selectedIds.length) (take(), duplicate(selectedIds));
+      else if (mod && code === "Backslash") (take(), setInspectorOpen(!inspectorOpen));
+      else if (mod && code === "Enter" && selectedIds.length) (take(), setSendIds(selectedIds));
+      else if ((plain && e.shiftKey && code === "Slash") || (mod && code === "Slash")) (take(), setShortcutsOpen(true));
+      else if (plain && !e.shiftKey && code === "Slash") (take(), document.getElementById("cmd-input")?.focus());
+      else if (plain && code === "Enter" && selectedIds.length === 1) {
+        // Enter: start using the selected frame (its first field), as Enter goes into a selection in Figma.
+        const field = document.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(selectedIds[0])}"] .frame-body :is(textarea, input, select, [contenteditable="true"])`);
+        if (field) (take(), field.focus());
       } else if (e.key === "Escape") {
-        if (tool === "link") setTool("select");
+        if (tool !== "select") setTool("select");
         setSelectedIds([]);
       } else if ((e.key === "Delete" || e.key === "Backspace") && (selectedIds.length || selectedLinkIds.length)) {
+        take();
         for (const id of selectedLinkIds) api.deleteLink(id).catch((err) => onNotice(err.message));
         if (selectedIds.length) removeTools(selectedIds);
-      } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && selectedIds.length) {
-        e.preventDefault();
-        setSendIds(selectedIds);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
-        e.preventDefault();
-        setSelectedIds(tools.map((tl) => tl.id));
       }
     };
+    const onKeyUp = (e: KeyboardEvent) => e.code === "Space" && setSpaceHeld(false);
+    const onBlur = () => setSpaceHeld(false);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [cam, selectedIds, selectedLinkIds, tools, removeTools, active, setTool, tool, api, onNotice]);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
+  });
+
+  // The desktop app's Edit → Select All asks the board first (its menu may take ⌘/Ctrl+A before the page sees it).
+  useEffect(() => {
+    if (!active) return;
+    const w = window as unknown as { __wbSelectAll?: () => boolean; __wbUndo?: () => boolean; __wbRedo?: () => boolean };
+    w.__wbSelectAll = () => {
+      if (keysTaken()) return false;
+      setSelectedIds(tools.map((tl) => tl.id));
+      return true;
+    };
+    w.__wbUndo = () => (keysTaken() ? false : (void runHistory("undo"), true));
+    w.__wbRedo = () => (keysTaken() ? false : (void runHistory("redo"), true));
+    return () => {
+      delete w.__wbSelectAll;
+      delete w.__wbUndo;
+      delete w.__wbRedo;
+    };
+  });
+
+  // ⌘/Ctrl+C, X and V copy, cut and paste frames. Through the clipboard events, so the desktop app's Edit menu works too.
+  useEffect(() => {
+    if (!active) return;
+    const onCopy = (e: ClipboardEvent) => {
+      if (keysTaken() || !selectedIds.length) return;
+      const picked = selectedIds.map((id) => toolsById[id]).filter(Boolean) as Tool[];
+      const text = picked.map((tl) => (tl.name ? `@${tl.name}` : tl.title)).join(" ");
+      copied = { tools: picked, text };
+      e.clipboardData?.setData("text/plain", text);
+      e.preventDefault();
+      if (e.type === "cut") removeTools(selectedIds);
+      else onNotice(picked.length === 1 ? t("Copied 1 frame", "프레임 1개 복사함") : t(`Copied ${picked.length} frames`, `프레임 ${picked.length}개 복사함`));
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      if (keysTaken() || !copied) return;
+      // Only our own last copy: text copied elsewhere since then is not frames.
+      if ((e.clipboardData?.getData("text/plain") ?? "") !== copied.text) return;
+      e.preventDefault();
+      copyTools(copied.tools, dropPoint());
+    };
+    document.addEventListener("copy", onCopy);
+    document.addEventListener("cut", onCopy);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      document.removeEventListener("copy", onCopy);
+      document.removeEventListener("cut", onCopy);
+      document.removeEventListener("paste", onPaste);
+    };
+  });
 
   // Right click on a link: which way it points, or remove it.
   const linkMenuItems = (l: Link): MenuItem[] => {
@@ -257,7 +460,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       { label: mark(false, `${b} → ${a}`), onSelect: () => set({ direction: "forward", from: l.to, to: l.from }) },
       { label: mark(l.direction === "both", t(`Both ways  ${a} ↔ ${b}`, `양방향  ${a} ↔ ${b}`)), onSelect: () => set({ direction: "both" }) },
       { separator: true },
-      { label: t("Delete link", "연결 삭제"), hint: "⌫", danger: true, onSelect: () => api.deleteLink(l.id).catch((err) => onNotice(err.message)) },
+      { label: t("Delete link", "연결 삭제"), hint: kbd("delete"), danger: true, onSelect: () => api.deleteLink(l.id).catch((err) => onNotice(err.message)) },
     ];
   };
 
@@ -265,14 +468,16 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     const targets = m.ids.map((id) => toolsById[id]).filter(Boolean) as Tool[];
     if (!targets.length) {
       return [
-        { label: t("+ Note here", "+ 메모 여기에"), onSelect: () => addTool("note", m.at) },
-        { label: t("+ Checklist here", "+ 체크리스트 여기에"), onSelect: () => addTool("checklist", m.at) },
-        { label: t("+ Browser here", "+ 브라우저 여기에"), onSelect: () => addTool("browser", m.at) },
+        { label: t("+ Note here", "+ 메모 여기에"), hint: "N", onSelect: () => addTool("note", m.at) },
+        { label: t("+ Checklist here", "+ 체크리스트 여기에"), hint: "C", onSelect: () => addTool("checklist", m.at) },
+        { label: t("+ Browser here", "+ 브라우저 여기에"), hint: "B", onSelect: () => addTool("browser", m.at) },
+        ...(copied ? [{ label: t("Paste here", "여기에 붙여넣기"), hint: kbd("mod+v"), onSelect: () => copyTools(copied!.tools, m.at) }] : []),
         { label: libraryOpen ? t("Close library", "라이브러리 닫기") : t("Open library", "라이브러리 열기"), onSelect: () => setLibraryOpen(!libraryOpen) },
         { separator: true },
         { label: t("Send to Claude…", "Claude에게 보내기…"), onSelect: () => setSendIds([]) },
-        { label: t("Select all", "모두 선택"), hint: "⌘A", onSelect: () => setSelectedIds(tools.map((tl) => tl.id)) },
-        { label: t("Zoom to fit all", "전체 보기"), hint: "⇧1", onSelect: cam.fitAll },
+        { label: t("Select all", "모두 선택"), hint: kbd("mod+a"), onSelect: () => setSelectedIds(tools.map((tl) => tl.id)) },
+        { label: t("Zoom to fit all", "전체 보기"), hint: kbd("shift+1"), onSelect: cam.fitAll },
+        { label: t("Keyboard shortcuts", "단축키"), hint: "?", onSelect: () => setShortcutsOpen(true) },
       ];
     }
     const one = targets.length === 1 ? targets[0] : null;
@@ -281,12 +486,12 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     return [
       {
         label: targets.length > 1 ? t(`Send ${targets.length} to Claude…`, `Claude에게 보내기 (${targets.length}개)…`) : t("Send to Claude…", "Claude에게 보내기…"),
-        hint: "⌘↵",
+        hint: kbd("mod+enter"),
         strong: true,
         onSelect: () => setSendIds(ids),
       },
       { separator: true },
-      { label: t("Zoom to fit", "화면에 맞추기"), onSelect: () => fitTo(ids) },
+      { label: t("Zoom to selection", "선택 영역에 맞추기"), hint: kbd("shift+2"), onSelect: () => fitTo(ids) },
       ...(one
         ? ([
             {
@@ -304,13 +509,21 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
             { label: t("Copy ID", "ID 복사"), hint: one.id, onSelect: () => navigator.clipboard?.writeText(one.id).then(() => onNotice(t(`Copied ${one.id}`, `${one.id} 복사됨`))) },
           ] as MenuItem[])
         : []),
-      { label: targets.length > 1 ? t(`Duplicate ${targets.length}`, `복제 (${targets.length}개)`) : t("Duplicate", "복제"), onSelect: () => duplicate(ids) },
+      {
+        label: t("Copy", "복사"),
+        hint: kbd("mod+c"),
+        onSelect: () => {
+          copied = { tools: targets, text: targets.map((tl) => (tl.name ? `@${tl.name}` : tl.title)).join(" ") };
+          navigator.clipboard?.writeText(copied.text).catch(() => {});
+        },
+      },
+      { label: targets.length > 1 ? t(`Duplicate ${targets.length}`, `복제 (${targets.length}개)`) : t("Duplicate", "복제"), hint: kbd("mod+d"), onSelect: () => duplicate(ids) },
       {
         label: allRead ? t("Let the agent edit", "agent가 수정할 수 있게") : t("Agent can only read", "agent는 읽기만"),
         onSelect: () => ids.forEach((id) => api.updateTool(id, { agentAccess: allRead ? "write" : "read" }).catch((err) => onNotice(err.message))),
       },
       { separator: true },
-      { label: targets.length > 1 ? t(`Delete ${targets.length}`, `${targets.length}개 삭제`) : t("Delete", "삭제"), hint: "⌫", danger: true, onSelect: () => removeTools(ids) },
+      { label: targets.length > 1 ? t(`Delete ${targets.length}`, `${targets.length}개 삭제`) : t("Delete", "삭제"), hint: kbd("delete"), danger: true, onSelect: () => removeTools(ids) },
     ];
   };
 
@@ -328,28 +541,18 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         <button className={`toggle${follow ? " on" : ""}`} aria-pressed={follow} onClick={() => setFollow(!follow)} title={t("Move the view to whatever the agent is working on", "agent가 작업하는 도구로 화면을 옮깁니다")}>
           <span className="dot" /> {t("Follow", "따라가기")}
         </button>
-        <div className="zoom" role="group" aria-label={t("Zoom", "확대/축소")}>
-          <button className="ghost icon" onClick={cam.zoomOut} aria-label={t("Zoom out", "축소")}>
-            −
-          </button>
-          <button className="ghost zoom-pct" onClick={() => cam.zoomTo(1)} title="100% (Shift+0)">
-            {Math.round(cam.zoom * 100)}%
-          </button>
-          <button className="ghost icon" onClick={cam.zoomIn} aria-label={t("Zoom in", "확대")}>
-            +
-          </button>
-          <button className="ghost" onClick={cam.fitAll} title={t("Zoom to fit all (Shift+1)", "전체 보기 (Shift+1)")}>
-            {t("Fit", "전체")}
-          </button>
-          <button
-            className={minimap ? "ghost on" : "ghost"}
-            aria-pressed={minimap}
-            onClick={() => setMinimap(!minimap)}
-            title={t("Minimap: the visible area of the whole board", "미니맵: 보드 전체에서 지금 보이는 영역")}
-          >
-            {t("Minimap", "미니맵")}
-          </button>
-        </div>
+        <button
+          className="ghost zoom-pct"
+          aria-haspopup="menu"
+          aria-label={t("Zoom", "확대/축소")}
+          data-tip={t("Zoom and view", "확대/축소 · 보기")}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setZoomMenu({ x: r.left, y: r.bottom + 4 });
+          }}
+        >
+          {Math.round(cam.zoom * 100)}% <span className="caret">▾</span>
+        </button>
         <button
           className="danger"
           title={t("Send the agent a stop event. It stops the next time it checks the board.", "agent에게 중단 이벤트를 보냅니다. agent가 보드를 확인할 때 멈춥니다.")}
@@ -361,8 +564,12 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       </header>
 
       <div className="board-main">
-        <div className={`canvas-wrap${minimap ? " minimap-on" : ""}${tool === "hand" ? " hand-mode" : ""}${tool === "link" ? " link-mode" : ""}`}>
+        <div className={`canvas-wrap tool-${tool}${minimap ? " minimap-on" : ""}${tool === "hand" ? " hand-mode" : ""}${tool === "link" ? " link-mode" : ""}${spaceHeld ? " space-pan" : ""}`}>
           <BoardCanvas
+            active={active}
+            onPointer={onPointer}
+            onCommit={onCommit}
+            onRename={onRename}
             showMinimap={minimap}
             tool={tool}
             links={links}
@@ -420,6 +627,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
                 tools={tools}
                 selected={selected}
                 onAdd={(k) => addTool(k)}
+                onShortcuts={() => setShortcutsOpen(true)}
                 onSend={async (prompt) => {
                   try {
                     const r = await api.sendToAgent(prompt, selectedIds);
@@ -494,6 +702,28 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         />
       )}
       {saveTool && <SaveToLibraryDialog tool={saveTool} onClose={() => setSaveTool(null)} onNotice={onNotice} />}
+      {zoomMenu && (
+        <ContextMenu
+          x={zoomMenu.x}
+          y={zoomMenu.y}
+          items={[
+            { label: t("Zoom in", "확대"), hint: kbd("mod+plus"), onSelect: cam.zoomIn },
+            { label: t("Zoom out", "축소"), hint: kbd("mod+minus"), onSelect: cam.zoomOut },
+            { label: t("Zoom to fit", "전체 보기"), hint: kbd("shift+1"), onSelect: cam.fitAll },
+            { label: t("Zoom to selection", "선택 영역에 맞추기"), hint: kbd("shift+2"), disabled: !selectedIds.length, onSelect: () => fitTo(selectedIds) },
+            { separator: true },
+            { label: "50%", onSelect: () => cam.zoomTo(0.5) },
+            { label: "100%", hint: kbd("shift+0"), onSelect: () => cam.zoomTo(1) },
+            { label: "200%", onSelect: () => cam.zoomTo(2) },
+            { separator: true },
+            { label: `${minimap ? "✓ " : "\u2003"}${t("Minimap", "미니맵")}`, onSelect: () => setMinimap(!minimap) },
+            { label: `${inspectorOpen ? "✓ " : "\u2003"}${t("Properties panel", "속성 패널")}`, hint: kbd("mod+\\"), onSelect: () => setInspectorOpen(!inspectorOpen) },
+            { label: t("Keyboard shortcuts", "단축키"), hint: "?", onSelect: () => setShortcutsOpen(true) },
+          ]}
+          onClose={() => setZoomMenu(null)}
+        />
+      )}
+      {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
     </section>
     </LiveProvider>
   );
@@ -573,18 +803,13 @@ function LoginBanner({ status, onOpenTerminal, onRefresh, onNotice }: { status: 
   );
 }
 
-const panHelp = (t: T) =>
-  t(
-    "Zoom: wheel, pinch / Pan: drag with the hand tool (H) · hold Space and drag · middle-button drag · Shift+wheel",
-    "확대·축소: 휠, 핀치 / 화면 이동: 손 도구(H)로 드래그 · Space 누른 채 드래그 · 가운데 버튼 드래그 · Shift+휠",
-  );
-
 function CommandBar({
   tool,
   onTool,
   tools,
   selected,
   onAdd,
+  onShortcuts,
   onSend,
   onNotice,
 }: {
@@ -593,6 +818,7 @@ function CommandBar({
   tools: Tool[];
   selected: Tool[];
   onAdd: (k: "note" | "checklist" | "browser") => void;
+  onShortcuts: () => void;
   onSend: (prompt: string) => Promise<void>;
   onNotice: (m: string) => void;
 }) {
@@ -647,7 +873,8 @@ function CommandBar({
           className={tool === "select" ? "tool on" : "tool"}
           aria-pressed={tool === "select"}
           onClick={() => onTool("select")}
-          title={`${t("Select (V): drag on empty space to select several", "선택 (V): 빈 곳을 드래그하면 여러 개를 선택합니다")}\n${panHelp(t)}`}
+          aria-label={t("Move", "이동")}
+          data-tip={`${t("Move", "이동")}   V`}
         >
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
             <path d="M3 2l9 5.2-4 .9-1.7 3.9z" fill="currentColor" />
@@ -657,7 +884,8 @@ function CommandBar({
           className={tool === "hand" ? "tool on" : "tool"}
           aria-pressed={tool === "hand"}
           onClick={() => onTool("hand")}
-          title={`${t("Hand (H): drag anywhere to pan", "손 (H): 어디서든 드래그해서 화면을 옮깁니다")}\n${panHelp(t)}`}
+          aria-label={t("Hand tool", "손 도구")}
+          data-tip={`${t("Hand tool", "손 도구")}   H · ${t("or hold Space", "또는 Space")}`}
         >
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
             <path
@@ -674,10 +902,8 @@ function CommandBar({
           className={tool === "link" ? "tool on" : "tool"}
           aria-pressed={tool === "link"}
           onClick={() => onTool("link")}
-          title={t(
-            "Link (L): drag from one frame to another (or click one, then the other). Right-click a link to set its direction. Claude sees the links.",
-            "연결 (L): 한 프레임에서 다른 프레임으로 끌어 잇습니다 (하나를 누르고 다른 하나를 눌러도 됩니다). 선을 우클릭하면 방향을 정합니다. Claude도 연결을 봅니다.",
-          )}
+          aria-label={t("Link", "연결")}
+          data-tip={`${t("Link frames", "프레임 연결")}   L`}
         >
           <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
             <circle cx="3.5" cy="12.5" r="1.8" fill="none" stroke="currentColor" strokeWidth="1.3" />
@@ -687,13 +913,13 @@ function CommandBar({
         </button>
       </div>
       <span className="sep" />
-      <button className="ghost" onClick={() => onAdd("note")} title={t("Add a note in the middle of the view", "화면 가운데에 메모 추가")}>
+      <button className="ghost" onClick={() => onAdd("note")} data-tip={`${t("Note", "메모")}   N`}>
         {t("+ Note", "+ 메모")}
       </button>
-      <button className="ghost" onClick={() => onAdd("checklist")} title={t("Add a checklist in the middle of the view", "화면 가운데에 체크리스트 추가")}>
+      <button className="ghost" onClick={() => onAdd("checklist")} data-tip={`${t("Checklist", "체크리스트")}   C`}>
         {t("+ Checklist", "+ 체크리스트")}
       </button>
-      <button className="ghost" onClick={() => onAdd("browser")} title={t("Add a web browser you and Claude share", "나와 Claude가 함께 쓰는 웹 브라우저 추가")}>
+      <button className="ghost" onClick={() => onAdd("browser")} data-tip={`${t("Browser you and Claude share", "나와 Claude가 함께 쓰는 브라우저")}   B`}>
         {t("+ Browser", "+ 브라우저")}
       </button>
       <span className="sep" />
@@ -722,6 +948,7 @@ function CommandBar({
           </div>
         )}
         <input
+          id="cmd-input"
           ref={inputRef}
           value={text}
           placeholder={
@@ -757,12 +984,17 @@ function CommandBar({
             if (e.key === "Enter") {
               e.preventDefault();
               send();
+            } else if (e.key === "Escape") {
+              e.currentTarget.blur(); // back to the canvas's shortcuts
             }
           }}
         />
       </div>
       <button className="primary" disabled={!clean || busy} onClick={send}>
         {t("Send ↵", "보내기 ↵")}
+      </button>
+      <button className="ghost icon help-btn" onClick={onShortcuts} aria-label={t("Keyboard shortcuts", "단축키")} data-tip={`${t("Keyboard shortcuts", "단축키")}   ?`}>
+        ?
       </button>
     </div>
   );

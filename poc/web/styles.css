@@ -243,8 +243,12 @@ textarea:focus {
   align-items: center;
 }
 .zoom-pct {
-  min-width: 52px;
+  min-width: 64px;
   font-variant-numeric: tabular-nums;
+}
+.zoom-pct .caret {
+  font-size: 9px;
+  opacity: 0.6;
 }
 
 /* ── board: canvas + inspector ─────────────────────────────────────────── */
@@ -311,11 +315,8 @@ textarea:focus {
   white-space: nowrap;
   font-size: 12px;
   color: var(--muted);
-  cursor: grab;
+  cursor: default;
   user-select: none;
-}
-.frame-label:active {
-  cursor: grabbing;
 }
 .frame-title {
   color: var(--text);
@@ -348,7 +349,7 @@ textarea:focus {
 .frame-shield {
   position: absolute;
   inset: 0;
-  cursor: pointer;
+  cursor: default;
 }
 /* Resize grips: a hit area about 12 screen px across at any zoom, centred on the frame's edge. The line or corner
    shows while the frame is selected or the pointer is on it. */
@@ -1712,22 +1713,79 @@ body.wb-panning iframe,
   color: var(--muted);
 }
 .commandbar .tool.on {
-  background: var(--panel);
-  color: var(--accent);
-  box-shadow: var(--shadow);
+  background: var(--accent);
+  color: #fff;
 }
-/* Hand tool: the whole canvas pans; frames (and app iframes) ignore the pointer so a drag never edits them. */
+.commandbar .tool:not(.on):hover {
+  background: var(--panel);
+  color: var(--text);
+}
+/* Cursors as in Figma: the move tool is an arrow everywhere (React Flow's defaults are a pointing hand on frames and
+   on the canvas, and a grab hand on draggable frames). Content inside a frame keeps its own (text, links, the page). */
+.canvas-wrap .react-flow__pane,
+.canvas-wrap .react-flow__pane.selection,
+.canvas-wrap .react-flow__pane.draggable,
+.canvas-wrap .react-flow__node,
+.canvas-wrap .react-flow__node.selectable,
+.canvas-wrap .react-flow__node.draggable,
+.canvas-wrap .react-flow__node.draggable.dragging,
+.canvas-wrap .react-flow__nodesselection-rect,
+.canvas-wrap .react-flow__edge {
+  cursor: default;
+}
+/* Hand tool, or Space held: the whole canvas pans; frames (and app iframes, browser pages) ignore the pointer so a
+   drag never edits them. */
 .canvas-wrap.hand-mode .react-flow__pane,
-.canvas-wrap.hand-mode .react-flow__node {
+.canvas-wrap.hand-mode .react-flow__node,
+.canvas-wrap.space-pan .react-flow__pane,
+.canvas-wrap.space-pan .react-flow__node,
+.canvas-wrap.space-pan .react-flow__nodesselection-rect {
   cursor: grab;
 }
 .canvas-wrap.hand-mode .react-flow__pane.dragging,
-.canvas-wrap.hand-mode .react-flow__pane:active {
+.canvas-wrap.hand-mode .react-flow__pane:active,
+.canvas-wrap.space-pan .react-flow__pane.dragging,
+.canvas-wrap.space-pan .react-flow__pane:active {
   cursor: grabbing;
 }
 .canvas-wrap.hand-mode .frame-body,
 .canvas-wrap.hand-mode .frame-label,
-.canvas-wrap.hand-mode iframe {
+.canvas-wrap.hand-mode iframe,
+.canvas-wrap.space-pan .frame-body,
+.canvas-wrap.space-pan .frame-label,
+.canvas-wrap.space-pan iframe {
+  pointer-events: none;
+}
+/* Hover: a thin outline on the frame under the pointer, as Figma shows what a click would pick. */
+.canvas-wrap.tool-select:not(.space-pan) .react-flow__node:hover > .frame:not(.selected) {
+  outline: calc(1px / var(--z, 1)) solid var(--accent);
+  outline-offset: calc(1px / var(--z, 1));
+}
+/* The selection box. */
+.canvas-wrap .react-flow__selection {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+}
+.canvas-wrap .react-flow__nodesselection-rect {
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  border-radius: 0;
+}
+/* Size of the one selected frame, under it (keeps its size on screen at any zoom). */
+.frame-size {
+  position: absolute;
+  top: calc(100% + 6px / var(--z, 1));
+  left: 50%;
+  transform-origin: 50% 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   pointer-events: none;
 }
 
@@ -1764,7 +1822,7 @@ body.wb-panning iframe,
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 .canvas-wrap.link-mode .react-flow__pane {
-  cursor: grab;
+  cursor: default;
 }
 /* The line keeps its width on screen at any zoom. */
 .react-flow__edge-path.link-line {
@@ -2245,4 +2303,107 @@ textarea.browser-keys {
   border-radius: 6px;
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+/* Figma-style tooltips: dark, quick, with the shortcut. data-tip on a button; above it by default, below in the
+   board header. */
+[data-tip] {
+  position: relative;
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: #1e1e1e;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: pre;
+  pointer-events: none;
+  z-index: 60;
+  animation: tip-in 0.12s ease-out 0.35s both;
+}
+.board-head [data-tip]:hover::after,
+.board-head [data-tip]:focus-visible::after {
+  bottom: auto;
+  top: calc(100% + 8px);
+}
+@keyframes tip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.commandbar .help-btn {
+  font-weight: 700;
+  color: var(--muted);
+}
+
+/* Keyboard shortcuts panel. */
+.modal.wide {
+  width: min(820px, calc(100vw - 32px));
+}
+.shortcuts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 6px 28px;
+}
+.shortcuts h4 {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.shortcuts dl {
+  margin: 0;
+}
+.shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+.shortcut-row dd {
+  margin: 0;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.shortcut-row kbd {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  white-space: nowrap;
+}
+
+/* Renaming a frame on its label (double-click the name). */
+.frame-rename {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 120px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--panel);
+  outline: none;
+}
+.frame-title {
+  cursor: default;
 }

@@ -6,7 +6,6 @@ import {
   BaseEdge,
   ConnectionLineType,
   ConnectionMode,
-  Controls,
   Handle,
   MiniMap,
   NodeResizeControl,
@@ -47,6 +46,17 @@ interface FrameData extends Record<string, unknown> {
   onNotice: (m: string) => void;
   /** The link tool is on: the whole frame is where a link starts or ends. */
   linking: boolean;
+  /** The only selected frame: it shows its size, as Figma does. */
+  solo: boolean;
+  /** A move or resize the person finished: for undo. */
+  onCommit: (changes: LayoutChange[]) => void;
+  onRename: (toolId: string, title: string) => void;
+}
+/** One frame's layout before and after a move or resize. */
+export interface LayoutChange {
+  id: string;
+  before: Partial<Layout>;
+  after: Partial<Layout>;
 }
 type FrameNode = Node<FrameData, "frame">;
 type LinkEdge = Edge<{ direction: LinkDirection }, "link">;
@@ -86,6 +96,14 @@ interface BoardCanvasProps {
   onAppErrors: (toolId: string, n: number) => void;
   onInteract: () => void;
   onNotice: (m: string) => void;
+  /** On screen: arrow keys move the selected frames. */
+  active: boolean;
+  /** The person moved or resized frames (drag, arrows, grips): for undo. */
+  onCommit: (changes: LayoutChange[]) => void;
+  /** The person renamed a frame on its label. */
+  onRename: (toolId: string, title: string) => void;
+  /** The pointer moved over the canvas (client coordinates): new frames from N / C / B and paste go there. */
+  onPointer: (p: { x: number; y: number } | null) => void;
   children?: React.ReactNode; // <Panel> overlays
 }
 
@@ -95,7 +113,7 @@ const edgeTypes = { link: LinkLine };
 export function BoardCanvas(props: BoardCanvasProps) {
   const api = useApi();
   const t = useT();
-  const { boardId, tools, selectedIds, onSelect, activeIds, waitingIds, appErrors, onAppErrors, onInteract, onNotice } = props;
+  const { boardId, tools, selectedIds, onSelect, activeIds, waitingIds, appErrors, onAppErrors, onInteract, onNotice, onCommit, onRename } = props;
   const linking = props.tool === "link";
   const rf = useReactFlow<FrameNode>();
   const [nodes, setNodes] = useState<FrameNode[]>([]);
@@ -140,13 +158,24 @@ export function BoardCanvas(props: BoardCanvasProps) {
             width: p?.resizing ? p.width : L.w,
             // Height follows the content, except browsers: they keep a set height and the page scrolls inside.
             height: p?.resizing ? p.height : t.kind === "browser" ? (L.h ?? BROWSER_HEIGHT.default) : undefined,
-            dragHandle: ".frame-label",
             selected: selectedSet.current.has(t.id),
-            data: { tool: t, active: activeIds.has(t.id), waiting: waitingIds.has(t.id), errors: appErrors[t.id] ?? 0, onAppErrors, onLayout, onNotice, linking },
+            data: {
+              tool: t,
+              active: activeIds.has(t.id),
+              waiting: waitingIds.has(t.id),
+              errors: appErrors[t.id] ?? 0,
+              onAppErrors,
+              onLayout,
+              onNotice,
+              linking,
+              solo: selectedIds.length === 1 && selectedIds[0] === t.id,
+              onCommit,
+              onRename,
+            },
           } as FrameNode;
         });
     });
-  }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice, linking]);
+  }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice, linking, onCommit, onRename]);
 
   // Board links → React Flow edges. Selection stays React Flow's; LinkLine draws the direction.
   const [edges, setEdges] = useState<LinkEdge[]>([]);
@@ -164,13 +193,13 @@ export function BoardCanvas(props: BoardCanvasProps) {
   }, []);
 
   const onNodesChange = useCallback((changes: NodeChange<FrameNode>[]) => {
-    // Frames are deleted from the inspector (with a confirm), never by a stray key press.
+    // Frames are deleted by BoardPanel (Delete key, menus, inspector), which can undo it; never by React Flow itself.
     setNodes((nds) => applyNodeChanges(changes.filter((c) => c.type !== "remove"), nds));
   }, []);
 
-  // The wheel zooms (React Flow, everywhere incl. over frames). Shift+wheel pans instead.
-  // Scrollable parts inside a frame are marked .nowheel and keep their own scrolling. A browser page takes a scroll
-  // that starts over it before this runs (see routeWheel in BrowserView).
+  // As in Figma: the wheel and two-finger scroll pan (React Flow), ⌘/Ctrl+wheel and pinch zoom. Shift+wheel pans
+  // sideways (here, for mice that only scroll vertically). Scrollable parts inside a frame are marked .nowheel and keep
+  // their own scrolling. A browser page takes a scroll that starts over it before this runs (see routeWheel in BrowserView).
   const wrapRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = wrapRef.current;
@@ -202,8 +231,50 @@ export function BoardCanvas(props: BoardCanvasProps) {
   );
   const flowPos = (e: { clientX: number; clientY: number }) => rf.screenToFlowPosition({ x: e.clientX, y: e.clientY });
 
+  // Arrow keys move the selected frames 1 board unit (Shift: 10), as in Figma. Saved once the keys rest.
+  const { active } = props;
+  const nudgeSave = useRef<number>(0);
+  const nudgeFrom = useRef<Map<string, { x: number; y: number }> | null>(null);
+  const dragFrom = useRef(new Map<string, { x: number; y: number }>());
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      const dir = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+      const el = document.activeElement;
+      const typing = !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable || !!el.closest(".term-window, .browser-page"));
+      if (document.querySelector('[role="menu"], .modal')) return; // a menu or dialog takes the arrows
+      if (!dir || typing || e.metaKey || e.ctrlKey || e.altKey || !selectedSet.current.size || props.tool !== "select") return;
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      if (!nudgeFrom.current) nudgeFrom.current = new Map(rf.getNodes().filter((n) => selectedSet.current.has(n.id)).map((n) => [n.id, { ...n.position }]));
+      setNodes((nds) => nds.map((n) => (selectedSet.current.has(n.id) ? { ...n, position: { x: n.position.x + dir[0] * step, y: n.position.y + dir[1] * step } } : n)));
+      onInteract();
+      window.clearTimeout(nudgeSave.current);
+      nudgeSave.current = window.setTimeout(() => {
+        const from = nudgeFrom.current ?? new Map();
+        nudgeFrom.current = null;
+        const changes: LayoutChange[] = [];
+        for (const n of rf.getNodes()) {
+          const b = from.get(n.id);
+          if (!b) continue;
+          onLayout(n.id, { x: n.position.x, y: n.position.y });
+          changes.push({ id: n.id, before: { x: Math.round(b.x), y: Math.round(b.y) }, after: { x: Math.round(n.position.x), y: Math.round(n.position.y) } });
+        }
+        if (changes.length) onCommit(changes);
+      }, 300);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [active, props.tool, rf, onLayout, onInteract, onCommit]);
+
+  const { onPointer } = props;
   return (
-    <div ref={wrapRef} className="flow-wrap">
+    <div
+      ref={wrapRef}
+      className="flow-wrap"
+      onPointerMove={(e) => onPointer({ x: e.clientX, y: e.clientY })}
+      onPointerLeave={() => onPointer(null)}
+    >
     <ReactFlow<FrameNode, LinkEdge>
       nodes={nodes}
       edges={edges}
@@ -225,8 +296,20 @@ export function BoardCanvas(props: BoardCanvasProps) {
         setEdges((eds) => eds.map((x) => ({ ...x, selected: x.id === edge.id })));
         props.onLinkMenu({ x: e.clientX, y: e.clientY }, edge.id);
       }}
-      onNodeDragStart={onInteract}
-      onNodeDragStop={(_e, _node, dragged) => dragged.forEach((n) => onLayout(n.id, { x: n.position.x, y: n.position.y }))}
+      onNodeDragStart={(_e, _node, dragged) => {
+        onInteract();
+        dragFrom.current = new Map(dragged.map((n) => [n.id, { ...n.position }]));
+      }}
+      onNodeDragStop={(_e, _node, dragged) => {
+        const changes: LayoutChange[] = [];
+        for (const n of dragged) {
+          onLayout(n.id, { x: n.position.x, y: n.position.y });
+          const b = dragFrom.current.get(n.id);
+          if (b && (Math.round(b.x) !== Math.round(n.position.x) || Math.round(b.y) !== Math.round(n.position.y)))
+            changes.push({ id: n.id, before: { x: Math.round(b.x), y: Math.round(b.y) }, after: { x: Math.round(n.position.x), y: Math.round(n.position.y) } });
+        }
+        if (changes.length) onCommit(changes);
+      }}
       onSelectionChange={onSelectionChange}
       onPaneClick={() => onSelect([])}
       onNodeContextMenu={(e, node) => {
@@ -268,8 +351,9 @@ export function BoardCanvas(props: BoardCanvasProps) {
       fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
       minZoom={0.2}
       maxZoom={2}
-      // Drag on empty space draws a selection box (touching frames are selected); the wheel and pinch zoom;
-      // Space+drag, middle-button drag, the hand tool or Shift+wheel pan; ⌘/Ctrl/Shift+click adds to the selection.
+      // Figma's controls: drag on empty space draws a selection box (touching frames are selected); the wheel and
+      // two-finger scroll pan; ⌘/Ctrl+wheel and pinch zoom at the pointer; Space+drag, middle-button drag and the hand
+      // tool pan; Shift (or ⌘/Ctrl) + click adds to the selection.
       selectionOnDrag={props.tool === "select"}
       selectionMode={SelectionMode.Partial}
       panOnDrag={props.tool === "select" ? [1] : true}
@@ -277,15 +361,19 @@ export function BoardCanvas(props: BoardCanvasProps) {
       elementsSelectable={props.tool !== "hand"}
       panActivationKeyCode="Space"
       multiSelectionKeyCode={["Meta", "Control", "Shift"]}
-      zoomOnScroll
+      panOnScroll
+      panOnScrollSpeed={1}
+      zoomOnScroll={false}
+      zoomActivationKeyCode={["Meta", "Control"]}
       zoomOnPinch
       zoomOnDoubleClick={false}
       deleteKeyCode={null}
+      // Its own arrow-key moves (5 px, on a focused frame) would add to ours (1, Shift 10, on the whole selection).
+      disableKeyboardA11y
       nodesConnectable={linking}
       colorMode="system"
     >
       <Background variant={BackgroundVariant.Dots} gap={24} size={1.3} />
-      <Controls position="bottom-left" showInteractive={false} />
       {props.showMinimap && (
         // Overview of the whole board: frames are blocks, the clear window is what is on screen. Drag or scroll it to move.
         <MiniMap
@@ -377,10 +465,20 @@ const BROWSER_GRIPS: [ControlPosition, ResizeControlVariant][] = [
   ["bottom-right", ResizeControlVariant.Handle],
 ];
 
-function FrameView({ data, selected }: NodeProps<FrameNode>) {
+function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
   const t = useT();
   const zoom = useStore((s) => s.transform[2]);
   const { tool, active, waiting, errors } = data;
+  const [renaming, setRenaming] = useState(false);
+  const resizeFrom = useRef<Partial<Layout>>({});
+  const resizeStart = (_e: unknown, p: { x: number; y: number; width: number; height: number }) => {
+    resizeFrom.current = { x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.width), ...(tool.kind === "browser" ? { h: Math.round(p.height) } : {}) };
+  };
+  const resizeEnd = (l: Partial<Layout>) => {
+    data.onLayout(tool.id, l);
+    const after = Object.fromEntries(Object.entries(l).map(([k, v]) => [k, Math.round(v as number)])) as Partial<Layout>;
+    data.onCommit([{ id: tool.id, before: resizeFrom.current, after }]);
+  };
   const browser = tool.kind === "browser";
   const cls = ["frame", browser && "browser-frame", selected && "selected", active && "active", waiting && "waiting", data.linking && "linking"].filter(Boolean).join(" ");
   return (
@@ -388,14 +486,40 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
       {/* Where links attach. With the link tool it covers the frame, so a link starts or ends anywhere on it. */}
       <Handle type="source" position={Position.Top} className="link-handle" isConnectable={data.linking} />
       <div className="frame-label" style={{ transform: `scale(${1 / zoom})` }} title={tool.description || tool.title}>
-        <span className="frame-title">{tool.title}</span>
+        {renaming ? (
+          <input
+            className="frame-rename nodrag"
+            defaultValue={tool.title}
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              else if (e.key === "Escape") {
+                e.currentTarget.value = tool.title;
+                e.currentTarget.blur();
+              }
+              e.stopPropagation();
+            }}
+            onBlur={(e) => {
+              const next = e.currentTarget.value.trim();
+              setRenaming(false);
+              if (next && next !== tool.title) data.onRename(tool.id, next);
+            }}
+          />
+        ) : (
+          // Double-click the name to rename it, as a layer in Figma.
+          <span className="frame-title" onDoubleClick={() => setRenaming(true)}>
+            {tool.title}
+          </span>
+        )}
         {tool.name && <span className="frame-name">@{tool.name}</span>}
         <span className="frame-kind">{kindLabel(tool.kind, t)}</span>
         {active && <span className="pill agent">{t("agent working", "agent 작업 중")}</span>}
         {waiting && <span className="pill wait">{t("awaiting reply", "응답 대기")}</span>}
         {errors > 0 && <span className="pill error">{t(`${errors} error${errors > 1 ? "s" : ""}`, `오류 ${errors}`)}</span>}
       </div>
-      <div className="frame-body">
+      {/* The label and the frame's edge move it (as a frame's name does in Figma); its content is for using the tool. */}
+      <div className="frame-body nodrag">
         <ToolBody tool={tool} onNotice={data.onNotice} onAppErrors={(n) => data.onAppErrors(tool.id, n)} />
         {tool.kind === "app" && !selected && (
           // First click selects the app; only then does its iframe get the pointer, so scroll/drag keep panning the canvas.
@@ -403,13 +527,19 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
           <div className="frame-shield" title={t("Click to use the app", "클릭해서 앱 사용")} />
         )}
       </div>
+      {data.solo && width ? (
+        <div className="frame-size" style={{ transform: `translateX(-50%) scale(${1 / zoom})` }} aria-hidden>
+          {Math.round(width)} × {Math.round(height ?? 0)}
+        </div>
+      ) : null}
       {selected && !browser && (
         <NodeResizeControl
           variant={ResizeControlVariant.Line}
           position="right"
           minWidth={240}
           maxWidth={1600}
-          onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, w: p.width })}
+          onResizeStart={resizeStart}
+          onResizeEnd={(_e, p) => resizeEnd({ x: p.x, y: p.y, w: p.width })}
         />
       )}
       {/* A browser frame resizes from its sides and bottom corners, selected or not (selecting it by clicking the page
@@ -425,7 +555,8 @@ function FrameView({ data, selected }: NodeProps<FrameNode>) {
             maxWidth={BROWSER_WIDTH.max}
             minHeight={BROWSER_HEIGHT.min}
             maxHeight={BROWSER_HEIGHT.max}
-            onResizeEnd={(_e, p) => data.onLayout(tool.id, { x: p.x, y: p.y, w: p.width, h: p.height })}
+            onResizeStart={resizeStart}
+            onResizeEnd={(_e, p) => resizeEnd({ x: p.x, y: p.y, w: p.width, h: p.height })}
           />
         ))}
     </div>

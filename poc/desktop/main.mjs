@@ -206,6 +206,16 @@ function createWindow() {
   return win;
 }
 
+/** Menu commands the board handles when it has the keys (window.__wb…() says true), else the page's own. */
+function boardFirst(hook, fallback) {
+  const wc = win?.webContents;
+  if (!wc) return;
+  void wc
+    .executeJavaScript(`window.${hook} ? window.${hook}() : false`)
+    .then((done) => done || fallback(wc))
+    .catch(() => fallback(wc));
+}
+
 function buildMenu() {
   const mac = process.platform === "darwin";
   const folder = (p) => () => void shell.openPath(p);
@@ -243,8 +253,26 @@ function buildMenu() {
         ...(mac ? [] : [{ type: "separator" }, { role: "quit" }]),
       ],
     },
-    { role: "editMenu" },
-    { role: "viewMenu" },
+    {
+      label: T("Edit", "편집"),
+      submenu: [
+        // On the board (not in a text field) these undo the board's steps; elsewhere the text's, as usual.
+        { label: T("Undo", "실행 취소"), accelerator: "CmdOrCtrl+Z", click: () => boardFirst("__wbUndo", (wc) => wc.undo()) },
+        { label: T("Redo", "다시 실행"), accelerator: mac ? "Shift+Cmd+Z" : "Ctrl+Y", click: () => boardFirst("__wbRedo", (wc) => wc.redo()) },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        ...(mac ? [{ role: "pasteAndMatchStyle" }] : []),
+        // On the board (not in a text field) it selects every frame; elsewhere all text, as usual.
+        { label: T("Select All", "모두 선택"), accelerator: "CmdOrCtrl+A", click: () => boardFirst("__wbSelectAll", (wc) => wc.selectAll()) },
+      ],
+    },
+    // Without the window zoom shortcuts: ⌘/Ctrl + = − 0 zoom the board, as in Figma.
+    {
+      label: T("View", "보기"),
+      submenu: [{ role: "reload" }, { role: "forceReload" }, { role: "toggleDevTools" }, { type: "separator" }, { role: "togglefullscreen" }],
+    },
     { role: "windowMenu" },
     {
       role: "help",

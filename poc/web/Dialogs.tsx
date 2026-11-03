@@ -6,7 +6,7 @@ import { useApi, ApiError, type AgentStatus } from "./api.ts";
 import { kindLabel, useT, type T } from "./i18n.tsx";
 import { ShellsideMark } from "./ShellsideMark.tsx";
 
-function Modal({ title, onClose, children }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode }) {
+export function Modal({ title, onClose, children, wide }: { title: React.ReactNode; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   const t = useT();
   useEffect(() => {
     const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -15,7 +15,7 @@ function Modal({ title, onClose, children }: { title: React.ReactNode; onClose: 
   }, [onClose]);
   return createPortal(
     <div className="modal-backdrop" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true">
+      <div className={wide ? "modal wide" : "modal"} role="dialog" aria-modal="true">
         <header className="modal-head">
           <h3>{title}</h3>
           <button className="ghost icon" onClick={onClose} aria-label={t("Close", "닫기")}>
