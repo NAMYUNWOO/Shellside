@@ -1,0 +1,17 @@
+{
+  "name": "shellside-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Shellside: Claude Code in a terminal beside a tool board it builds",
+  "author": "NAM YUNWOO",
+  "scripts": {
+    "stage": "node build.mjs",
+    "start": "node build.mjs && electron stage",
+    "dist": "node build.mjs && electron-builder --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "electron": "44.9.3",
+    "electron-builder": "26.17.0"
+  }
+}
