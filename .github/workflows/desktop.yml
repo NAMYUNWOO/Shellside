@@ -1,0 +1,123 @@
+# Checks the board terminal on Windows, macOS and Linux, builds the Shellside desktop app for macOS and Windows, runs
+# each build once (SHELLSIDE_SMOKE), and on a version tag (v0.1.0, …) puts the builds on a draft GitHub release.
+name: Desktop app
+
+on:
+  push:
+    branches: [main, desktop-app]
+    tags: ["v*"]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terminal:
+    name: Board terminal (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: poc
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: poc/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: node test/terminal-check.mjs
+
+  app:
+    name: App (${{ matrix.name }})
+    needs: terminal
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+            builder: --mac
+            exe: release/mac-arm64/Shellside.app/Contents/MacOS/Shellside
+          - os: windows-latest
+            name: Windows
+            builder: --win
+            exe: release/win-unpacked/Shellside.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: poc/desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            poc/package-lock.json
+            poc/desktop/package-lock.json
+      - name: Tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+      - run: npm ci
+        working-directory: poc
+      - run: npm ci
+      - run: npm run stage
+      - run: npx electron-builder --config electron-builder.yml ${{ matrix.builder }} --publish never
+      - name: Run the built app once
+        shell: bash
+        run: |
+          tmp="$RUNNER_TEMP"
+          command -v cygpath > /dev/null && tmp="$(cygpath -m "$tmp")" # D:/a/_temp: one spelling for bash and the app
+          out="$tmp/smoke"
+          mkdir -p "$out"
+          export SHELLSIDE_SMOKE="$out/result.json" WB_DATA_DIR="$out/data" WB_WORKSPACES="$out/ws"
+          "${{ matrix.exe }}" --user-data-dir="$out/profile" > "$out/stdout.txt" 2>&1 &
+          pid=$!
+          for i in $(seq 1 180); do [ -f "$SHELLSIDE_SMOKE" ] && break; sleep 1; done
+          sleep 2
+          logs() { cat "$out/stdout.txt"; cat "$out/profile/logs/server.log" "$HOME/Library/Logs/Shellside/server.log" 2> /dev/null; }
+          cat "$SHELLSIDE_SMOKE" || { echo "no result"; logs; exit 1; }
+          node -e "const r = require(process.argv[1]); process.exit(r.ok ? 0 : 1)" "$SHELLSIDE_SMOKE" || { logs; exit 1; }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: shellside-${{ matrix.name }}
+          path: |
+            poc/desktop/release/*.dmg
+            poc/desktop/release/*.zip
+            poc/desktop/release/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: app
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          path: builds
+          merge-multiple: true
+      - name: Put the builds on a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la builds
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" builds/* --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" builds/* --draft --title "Shellside $GITHUB_REF_NAME" --notes "Desktop builds for macOS and Windows." -R "$GITHUB_REPOSITORY"
+          fi

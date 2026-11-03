@@ -16,7 +16,7 @@
     "dev:server": "tsx server/index.ts",
     "dev:web": "vite",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "start": "tsx server/index.ts --production",
     "typecheck": "tsc --noEmit",
     "dev:server:watch": "tsx watch --clear-screen=false server/index.ts",
     "postinstall": "node -e \"const fs=require('fs'),p=require('path');const d=p.join('node_modules','node-pty','prebuilds');if(fs.existsSync(d))for(const x of fs.readdirSync(d)){const f=p.join(d,x,'spawn-helper');if(fs.existsSync(f))fs.chmodSync(f,0o755)}\""

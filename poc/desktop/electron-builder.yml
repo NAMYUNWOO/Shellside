@@ -1,0 +1,44 @@
+# Wraps desktop/stage (made by build.mjs) into the Shellside app: a .dmg and .zip for macOS, an installer and a .zip
+# for Windows. The builds are not code-signed (macOS: ad-hoc signature only), so macOS and Windows warn on first open;
+# poc/README.md says how to open them.
+appId: io.github.namyunwoo.shellside
+productName: Shellside
+copyright: Copyright © 2026 NAM YUNWOO
+directories:
+  app: stage
+  output: release
+  buildResources: build
+# Not packed into an archive: board terminals run bin/wb, and node-pty's helpers run from disk.
+asar: false
+# The board UI is in English and Korean; Chromium's other UI languages only add size.
+electronLanguages: [en, en-US, en-GB, ko]
+# node-pty ships prebuilt binaries for Node's stable ABI (N-API), which Electron loads as is.
+npmRebuild: false
+nodeGypRebuild: false
+artifactName: Shellside-${version}-${os}-${arch}.${ext}
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  identity: "-"
+  hardenedRuntime: false
+  extendInfo:
+    NSHumanReadableCopyright: Copyright © 2026 NAM YUNWOO
+dmg:
+  artifactName: Shellside-${version}-mac-${arch}.${ext}
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+nsis:
+  # Per-user install (no administrator), into %LOCALAPPDATA%\Programs\Shellside, with Start menu and desktop shortcuts.
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: Shellside-Setup-${version}-${arch}.${ext}
+publish: null

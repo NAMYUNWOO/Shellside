@@ -11,7 +11,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import type { IncomingMessage } from "node:http";
 import { dirname } from "node:path";
 
-export const SESSION_COOKIE = "wb_session";
+/** Cookies are per host, not per port: a server on another port (e.g. the desktop app's) keeps its own cookie. */
+export const sessionCookie = (port: number) => (port === 4100 ? "wb_session" : `wb_session_${port}`);
 const COOKIE_MAX_AGE = 400 * 24 * 3600; // the longest Chrome keeps a cookie
 const CODE_DIGITS = 8;
 const CODE_TTL_MS = 10 * 60_000;
@@ -36,9 +37,12 @@ export class HumanSessions {
   private fresh: boolean;
   private code: { digits: string; expires: number; tries: number } | null = null;
   private codeAt = 0;
+  /** Called with each new code. The desktop app shows it in a window of its own: it has no console. */
+  onCode?: (digits: string, expiresAt: number) => void;
 
   constructor(
     private file: string,
+    private cookie = "wb_session",
     private log: (line: string) => void = (line) => console.log(line),
   ) {
     this.fresh = !existsSync(file);
@@ -53,7 +57,7 @@ export class HumanSessions {
 
   /** The request comes from a paired browser. */
   isHuman(req: IncomingMessage) {
-    const token = cookieValue(req.headers.cookie, SESSION_COOKIE);
+    const token = cookieValue(req.headers.cookie, this.cookie);
     return !!token && this.hashes.has(sha256(token));
   }
 
@@ -79,6 +83,7 @@ export class HumanSessions {
         "",
       ].join("\n"),
     );
+    this.onCode?.(digits, this.code.expires);
     return { ok: true, expiresAt: this.code.expires };
   }
 
@@ -106,6 +111,23 @@ export class HumanSessions {
     return { ok: true, cookie: this.issue(req, temporary) };
   }
 
+  /**
+   * The desktop app's own window: a fresh session on every launch, replacing the last one. The app sets the cookie in
+   * its window itself (asked over its private channel to this process), so the window never needs a code.
+   */
+  appSession(): { name: string; value: string; maxAge: number } {
+    const old = this.sessions.filter((s) => s.id === "app");
+    this.sessions = this.sessions.filter((s) => s.id !== "app");
+    for (const s of old) this.hashes.delete(s.hash);
+    const token = randomBytes(32).toString("base64url");
+    const session = { id: "app", hash: sha256(token), label: "the Shellside app", createdAt: new Date().toISOString() };
+    this.hashes.add(session.hash);
+    this.fresh = false;
+    this.sessions.push(session);
+    this.save();
+    return { name: this.cookie, value: token, maxAge: COOKIE_MAX_AGE };
+  }
+
   private issue(req: IncomingMessage, temporary = false) {
     const token = randomBytes(32).toString("base64url");
     const session = { id: randomBytes(6).toString("hex"), hash: sha256(token), label: browserLabel(req.headers["user-agent"]), createdAt: new Date().toISOString() };
@@ -113,12 +135,12 @@ export class HumanSessions {
     this.fresh = false;
     if (temporary) {
       this.log(`[workboard] paired ${session.label} until the server stops · 서버가 멈출 때까지 연결했습니다`);
-      return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`;
+      return `${this.cookie}=${token}; Path=/; HttpOnly; SameSite=Strict`;
     }
     this.sessions.push(session);
     this.save();
     this.log(`[workboard] paired a browser (${session.label}); ${this.sessions.length} paired · 브라우저를 연결했습니다`);
-    return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${COOKIE_MAX_AGE}`;
+    return `${this.cookie}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${COOKIE_MAX_AGE}`;
   }
 
   private save() {

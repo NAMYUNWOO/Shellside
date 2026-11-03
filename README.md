@@ -124,9 +124,32 @@ The full design is in [docs/product-plan.md](docs/product-plan.md). The PoC inte
 
 ## Quick start
 
-Requirements: macOS or Linux (on Windows, WSL2), Node.js 22+, [Claude Code](https://claude.com/claude-code) installed
-and signed in, and Google Chrome (or Chromium, Edge, Brave) for the board browser. Without one, run
-`npx playwright install chromium`. **On WSL** the board browser must be a Linux browser inside WSL, because the server
+### Desktop app (macOS, Windows)
+
+Download Shellside from [Releases](https://github.com/NAMYUNWOO/Shellside/releases/latest) and open it. The board
+opens in its own window; there is nothing to start from a terminal or PowerShell.
+
+| System | File |
+| --- | --- |
+| macOS, Apple silicon | `Shellside-<version>-mac-arm64.dmg` |
+| macOS, Intel | `Shellside-<version>-mac-x64.dmg` |
+| Windows 10/11 (x64) | `Shellside-Setup-<version>-x64.exe` (or the `.zip`, which runs without installing) |
+
+You still need [Claude Code](https://code.claude.com/docs/en/setup) installed and signed in, and Chrome for the board
+browser (Edge, which Windows has, works too). The builds aren't code-signed yet, so the first open takes one more step:
+
+- **macOS:** open the app once and close the warning, then System Settings → Privacy & Security → **Open Anyway**.
+- **Windows:** when SmartScreen says "Windows protected your PC", choose **More info** → **Run anyway**.
+
+Details (where boards are kept, other browsers, building it yourself) are in
+[poc/README.md](poc/README.md#desktop-app).
+
+### From source
+
+Requirements: macOS, Linux or Windows 10/11 (WSL2 works too), Node.js 22+, [Claude Code](https://claude.com/claude-code)
+installed and signed in, and Google Chrome (or Chromium, Edge, Brave) for the board browser. Without one, run
+`npx playwright install chromium`. On Windows the board terminal is PowerShell; see
+[Windows](poc/README.md#windows). **On WSL** the board browser must be a Linux browser inside WSL, because the server
 can't drive Windows Chrome from there. `npx playwright install chromium` in WSL installs one, and needs no restart.
 
 ```bash
@@ -151,7 +174,8 @@ Shellside runs a real shell for every board, so treat it like one.
 - The server listens only on `127.0.0.1`. It checks `Host` and `Origin`, and refuses requests the browser marks as
   cross-site, so other websites and DNS rebinding can't reach it. **Don't expose the port** (no port forwarding, no tunnels).
 - Only a browser paired with the server counts as you. The first browser that opens a new server is paired
-  automatically; any other browser types a one-time code that the server prints in its own console. Everything else
+  automatically; any other browser types a one-time code that the server prints in its own console (the desktop app's
+  own window is paired by the app, and shows codes for other browsers in a dialog). Everything else
   that reaches the server, including Claude in a board's terminal (curl, scripts, the `wb` CLI), acts as the agent at
   most: it can't answer Claude's asks, type into a terminal or send requests as you.
 - Each board's terminal runs with your user's permissions, and so does Claude inside it. There is no container
@@ -167,6 +191,7 @@ Shellside runs a real shell for every board, so treat it like one.
 
 ```
 poc/                 the proof of concept (server, web app, app sandbox, wb CLI, examples)
+poc/desktop/         the desktop app (Electron) for macOS and Windows
 docs/product-plan.md product plan: problem, scenarios, architecture, risks, roadmap
 docs/images/         screenshots used in this README
 ```

@@ -43,22 +43,26 @@ If MCP is unavailable, the \`wb\` CLI does the same (\`wb help\`). Answer in the
 // The first settings we shipped (no hooks). Files still equal to it are ours to upgrade.
 const SETTINGS_V1 = JSON.stringify({ enabledMcpjsonServers: ["workboard"], permissions: { allow: ["mcp__workboard"] } }, null, 2) + "\n";
 
-/** Claude Code hooks report Claude's state (idle / busy / waiting for permission) to the board. */
-function settingsFor(hookCommand: string) {
-  const hook = (event: string, matcher?: string) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `${hookCommand} ${event}`, timeout: 5 }] }];
+/**
+ * Claude Code hooks report Claude's state (idle / busy / waiting for permission) to the board. They are HTTP hooks
+ * (Claude Code 2.1.63+): Claude Code POSTs the hook input to this board's server itself, so no shell or Node runs per
+ * hook, and nothing depends on how a shell quotes paths (PowerShell runs `"C:\…\node.exe" …` as a mere string).
+ */
+function settingsFor(hookUrl: string) {
+  const hook = (matcher?: string) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: "http", url: hookUrl, headers: { "x-wb-actor": "agent" }, timeout: 5 }] }];
   return (
     JSON.stringify(
       {
         enabledMcpjsonServers: ["workboard"],
         permissions: { allow: ["mcp__workboard"] },
         hooks: {
-          SessionStart: hook("SessionStart"),
-          UserPromptSubmit: hook("UserPromptSubmit"),
-          Notification: hook("Notification"),
-          PostToolUse: hook("PostToolUse", "*"),
-          Stop: hook("Stop"),
-          StopFailure: hook("StopFailure"),
-          SessionEnd: hook("SessionEnd"),
+          SessionStart: hook(),
+          UserPromptSubmit: hook(),
+          Notification: hook(),
+          PostToolUse: hook("*"),
+          Stop: hook(),
+          StopFailure: hook(),
+          SessionEnd: hook(),
         },
       },
       null,
@@ -90,8 +94,48 @@ claude() {
 }
 `;
 
+// PowerShell board terminals (the default on Windows; 5.1, or 7 as pwsh). PowerShell loads the person's profile, then
+// runs this, passed with -EncodedCommand: execution policy applies to script files, not to command text, so a policy
+// that blocks scripts can't block it. Same `claude` wrapper as the bashrc, plus a file (WB_FG) that says what runs in
+// the foreground: node-pty can't tell on Windows (its `process` is only the terminal's name). The rules go in by file:
+// Windows PowerShell 5.1 mangles double quotes inside arguments to programs.
+export const POWERSHELL_INIT = `# WorkBoard board terminal for PowerShell (generated).
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$env:PATH = $env:WB_BIN + [System.IO.Path]::PathSeparator + $env:PATH
+function global:Set-WbForeground([string]$name) { try { [System.IO.File]::WriteAllText($env:WB_FG, $name) } catch {} }
+function global:claude {
+  $exe = Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $exe) { Write-Host 'Claude Code is not installed. See https://code.claude.com/docs/en/setup'; return }
+  $first = if ($args.Count) { [string]$args[0] } else { '' }
+  $plain = @('auth','mcp','config','doctor','update','upgrade','install','plugin','plugins','setup-token','migrate-installer','-v','--version','-h','--help')
+  Set-WbForeground 'claude'
+  try {
+    if ($plain -contains $first) { & $exe.Source @args }
+    else { & $exe.Source --mcp-config $env:WB_MCP_CONFIG --settings $env:WB_SETTINGS --append-system-prompt-file $env:WB_RULES @args }
+  } finally { Set-WbForeground 'powershell' }
+}
+$global:WbPrompt = $function:prompt
+function global:prompt { Set-WbForeground 'powershell'; & $global:WbPrompt }
+if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {
+  Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+    $line = $null; $cursor = $null
+    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+    $cmd = ($line.Trim() -split '\\s+')[0]
+    if ($cmd) { Set-WbForeground $cmd }
+    [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+  }
+}
+Set-WbForeground 'powershell'
+`;
+
+/** PowerShell's arguments for a board terminal: the person's profile, then POWERSHELL_INIT. */
+export const powershellArgs = () => ["-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(POWERSHELL_INIT, "utf16le").toString("base64")];
+
 /** Files that attach a board to any Claude session started in its terminal (kept in WorkBoard's data folder). */
-export function writeSessionKit(dir: string, mcpUrl: string, hookCommand: string) {
+export function writeSessionKit(dir: string, mcpUrl: string, hookUrl: string) {
   mkdirSync(dir, { recursive: true });
   const kit = {
     mcpConfig: join(dir, "mcp.json"),
@@ -100,14 +144,14 @@ export function writeSessionKit(dir: string, mcpUrl: string, hookCommand: string
     bashrc: join(dir, "bashrc"),
   };
   writeFileSync(kit.mcpConfig, JSON.stringify({ mcpServers: { workboard: { type: "http", url: mcpUrl } } }, null, 2) + "\n");
-  writeFileSync(kit.settings, settingsFor(hookCommand));
+  writeFileSync(kit.settings, settingsFor(hookUrl));
   writeFileSync(kit.rules, BOARD_RULES);
   writeFileSync(kit.bashrc, BASHRC);
   return kit;
 }
 
 /** mcpUrl: this board's own MCP endpoint, so the Claude session started here sees only its board. */
-export function prepareWorkspace(dir: string, mcpUrl: string, hookCommand: string) {
+export function prepareWorkspace(dir: string, mcpUrl: string, hookUrl: string) {
   mkdirSync(join(dir, ".claude"), { recursive: true });
 
   // .mcp.json is managed by WorkBoard: rewritten on every start so the URL stays right.
@@ -134,7 +178,7 @@ export function prepareWorkspace(dir: string, mcpUrl: string, hookCommand: strin
   // .claude/settings.json: ours while it is exactly what we last wrote (hash kept beside it); edited by hand = theirs.
   const settingsPath = join(dir, ".claude", "settings.json");
   const markPath = join(dir, ".claude", ".workboard-settings.sha1");
-  const want = settingsFor(hookCommand);
+  const want = settingsFor(hookUrl);
   const current = existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : null;
   const ours = current === null || current === SETTINGS_V1 || (existsSync(markPath) && readFileSync(markPath, "utf8").trim() === sha(current));
   if (ours && current !== want) {

@@ -963,7 +963,11 @@ export class BrowserTool {
     // Only files the person just uploaded through the board for this browser.
     const allowed = resolve(this.owner.workspace, ".board", "uploads", this.toolId);
     const files = msg.paths.map((p: unknown) => resolve(String(p)));
-    for (const f of files) if (!f.startsWith(allowed + "/") || !existsSync(f)) throw new BoardError("that file was not uploaded for this browser");
+    const inside = (f: string) => {
+      const rel = relative(allowed, f);
+      return !!rel && !rel.startsWith("..") && !isAbsolute(rel);
+    };
+    for (const f of files) if (!inside(f) || !existsSync(f)) throw new BoardError("that file was not uploaded for this browser");
     await this.send(tab, "DOM.setFileInputFiles", { files, backendNodeId: chooser.backendNodeId });
   }
 
