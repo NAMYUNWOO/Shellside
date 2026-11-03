@@ -109,11 +109,11 @@ const humanOnly = (actor: Actor, what: string) => {
 };
 
 /** Hand a request to the board's agent: into Claude's prompt if it runs, else start Claude with it. */
-function sendToAgent(rt: BoardRuntime, prompt: string, toolIds: string[], lang: Lang) {
+function sendToAgent(rt: BoardRuntime, prompt: string, toolIds: string[], lang: Lang, sectionIds: string[] = []) {
   if (!prompt?.trim()) throw new BoardError(L(lang, "Write what you want Claude to do.", "Claude에게 보낼 내용을 적어 주세요."));
-  const { tools, links } = requestTools(rt.board, prompt, toolIds);
+  const { tools, links, sections } = requestTools(rt.board, prompt, toolIds, sectionIds);
   if (!rt.shell.running) throw new BoardError(L(lang, "This board's terminal hasn't started yet. Open the terminal once.", "이 보드의 터미널이 아직 시작되지 않았습니다. 터미널을 한 번 열어 주세요."), 409);
-  const text = composeRequest(prompt, tools, links);
+  const text = composeRequest(prompt, tools, links, sections);
   const fg = rt.shell.foreground();
   let mode: "claude" | "started";
   const state = rt.agentState();
@@ -285,7 +285,8 @@ const boardRoutes: BoardRoute[] = [
     /^\/agent\/send$/,
     ({ rt, body, actor, lang }) => {
       humanOnly(actor, "requests to the agent");
-      return sendToAgent(rt, String(body?.prompt ?? ""), Array.isArray(body?.toolIds) ? body.toolIds.map(String) : [], lang);
+      const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+      return sendToAgent(rt, String(body?.prompt ?? ""), list(body?.toolIds), lang, list(body?.sectionIds));
     },
   ],
   ["GET", /^\/catalog$/, () => ({ doc: CATALOG_DOC })],
@@ -310,6 +311,18 @@ const boardRoutes: BoardRoute[] = [
   ["PATCH", /^\/tools\/([\w-]+)\/layout$/, ({ rt, params, body }) => rt.board.setLayout(params[0], body ?? {})],
   ["POST", /^\/tools\/([\w-]+)\/patch$/, ({ rt, params, body, actor }) => rt.board.patchState(actor, params[0], body?.patch, body?.baseVersion)],
   ["POST", /^\/links$/, ({ rt, body, actor }) => rt.board.createLink(actor, body ?? {})],
+  // Sections: named areas that group tools.
+  ["POST", /^\/sections$/, ({ rt, body, actor }) => rt.board.createSection(actor, body ?? {})],
+  ["PATCH", /^\/sections\/([\w-]+)$/, ({ rt, params, body, actor }) => rt.board.updateSection(actor, params[0], body ?? {})],
+  ["PATCH", /^\/sections\/([\w-]+)\/layout$/, ({ rt, params, body }) => rt.board.setSectionLayout(params[0], body ?? {}, body?.moveContents === true)],
+  [
+    "DELETE",
+    /^\/sections\/([\w-]+)$/,
+    ({ rt, params, actor, url }) => {
+      rt.board.deleteSection(actor, params[0], url.searchParams.get("contents") === "1");
+      return { ok: true };
+    },
+  ],
   ["PATCH", /^\/links\/([\w-]+)$/, ({ rt, params, body, actor }) => rt.board.updateLink(actor, params[0], body ?? {})],
   [
     "DELETE",

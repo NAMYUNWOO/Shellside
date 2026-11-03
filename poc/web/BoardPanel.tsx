@@ -1,7 +1,7 @@
 // One work board: a Figma-like canvas of tool frames, an inspector on the right, the agent's asks floating on top.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, ReactFlowProvider, useReactFlow } from "@xyflow/react";
-import type { Link, LinkDirection, Tool } from "../shared/catalog.ts";
+import { frameAnchor, inSection, SECTION_COLORS, type Link, type LinkDirection, type Section, type SectionColor, type SectionLayout, type Tool } from "../shared/catalog.ts";
 import { useApi, ApiError, loginProblem, type AgentStatus } from "./api.ts";
 import { ShellsideMark } from "./ShellsideMark.tsx";
 import { AskCard } from "./Asks.tsx";
@@ -73,7 +73,7 @@ type Menu = { x: number; y: number; ids: string[]; at: { x: number; y: number } 
 function BoardView({ boardId, boardName, active, agentStatus, terminalButton, onNotice, onSentToClaude, onOpenTerminal, onRefreshStatus }: BoardPanelProps) {
   const api = useApi();
   const t = useT();
-  const { tools, toolsById, asks, events, library, channels, links, live, connected, ready } = useBoard(boardId);
+  const { tools, toolsById, asks, events, library, channels, links, sections, sectionsById, live, connected, ready } = useBoard(boardId);
   const now = useNow();
   const cam = useCanvasActions();
   const rf = useReactFlow();
@@ -95,6 +95,11 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   const [selectedLinkIds, setSelectedLinkIds] = useState<string[]>([]);
   const onSelectLinks = useCallback((ids: string[]) => setSelectedLinkIds((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids)), []);
   const [sendIds, setSendIds] = useState<string[] | null>(null);
+  const [sendSectionIds, setSendSectionIds] = useState<string[]>([]);
+  const [selectedSectionIds, setSelectedSectionIds] = useState<string[]>([]);
+  const [sectionMenu, setSectionMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  /** Shift (or ⌘/Ctrl) held: a click adds to the selection instead of replacing it. */
+  const adding = useRef(false);
   const [saveTool, setSaveTool] = useState<Tool | null>(null);
   const [appErrors, setAppErrors] = useState<Record<string, number>>({});
   const [activeUntil, setActiveUntil] = useState<Record<string, number>>({});
@@ -106,7 +111,21 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     lastInteract.current = Date.now();
   }, []);
   const onAppErrors = useCallback((id: string, n: number) => setAppErrors((e) => (e[id] === n ? e : { ...e, [id]: n })), []);
-  const onSelect = useCallback((ids: string[]) => setSelectedIds((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids)), []);
+  const onSelect = useCallback((ids: string[]) => {
+    setSelectedIds((prev) => (prev.length === ids.length && prev.every((id, i) => id === ids[i]) ? prev : ids));
+    // Picking frames (not adding to a selection) leaves the sections.
+    if (ids.length && !adding.current) setSelectedSectionIds((prev) => (prev.length ? [] : prev));
+  }, []);
+  const onSelectSections = useCallback((ids: string[], additive: boolean) => {
+    if (additive) setSelectedSectionIds((prev) => (ids.every((id) => prev.includes(id)) ? prev.filter((id) => !ids.includes(id)) : [...new Set([...prev, ...ids])]));
+    else {
+      setSelectedSectionIds(ids);
+      if (ids.length) setSelectedIds([]);
+    }
+  }, []);
+  /** The tools in a section (by where their top part is, as the server counts them). */
+  const toolsInSection = (sec: Section) => tools.filter((tl) => tl.layout && inSection(frameAnchor(tl.layout), sec.layout));
+  const selectedSections = selectedSectionIds.map((id) => sectionsById[id]).filter(Boolean) as Section[];
 
   // Drop selections whose frames are gone.
   useEffect(() => {
@@ -177,6 +196,8 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   toolsRef.current = toolsById;
   const linksRef = useRef(links);
   linksRef.current = links;
+  const sectionsRef = useRef(sectionsById);
+  sectionsRef.current = sectionsById;
   const resolve = (id: string) => {
     const seen = new Set<string>();
     while (history.current.alias.has(id) && !seen.has(id)) seen.add(id), (id = history.current.alias.get(id)!);
@@ -207,7 +228,8 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         state: s.state,
         ...(s.layout ? { width: s.layout.w, at: { x: s.layout.x + s.layout.w / 2, y: s.layout.y + 80 } } : {}),
       };
-      const made = await api.createTool({ ...input, name: s.name }).catch(() => api.createTool(input));
+      // The same id when it is free (it is, once deleted): the agent's references stay good.
+      const made = await api.createTool({ ...input, id: s.id, name: s.name } as Partial<Tool>).catch(() => api.createTool(input));
       history.current.alias.set(s.id, made.id);
       if (s.layout) await api.setLayout(made.id, { x: s.layout.x, y: s.layout.y, w: s.layout.w, ...(s.layout.h ? { h: s.layout.h } : {}) }).catch(() => {});
       if (s.agentAccess === "read") await api.updateTool(made.id, { agentAccess: "read" }).catch(() => {});
@@ -256,6 +278,135 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     void apply(title)().catch((err) => onNotice(err.message));
     record({ label: t("Rename", "이름 바꾸기"), undo: apply(before), redo: apply(title) });
   }, [api, t, onNotice]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── sections ──
+  /** Bring a removed section back, with its id, name, colour and place. */
+  const reviveSection = (sec: Section) =>
+    api.createSection({ id: sec.id, title: sec.title, name: sec.name, color: sec.color, layout: sec.layout }).catch(() =>
+      api.createSection({ title: sec.title, color: sec.color, layout: sec.layout }),
+    );
+  const recordSectionMade = (sec: Section, label: string) => {
+    let kept = sec;
+    record({
+      label,
+      undo: async () => {
+        kept = sectionsRef.current[sec.id] ?? kept;
+        await api.deleteSection(sec.id);
+      },
+      redo: async () => void (await reviveSection(kept)),
+    });
+  };
+  const drawSection = async (layout: SectionLayout) => {
+    setTool("select");
+    try {
+      const sec = await api.createSection({ layout });
+      setSelectedSectionIds([sec.id]);
+      setSelectedIds([]);
+      recordSectionMade(sec, t("Add section", "섹션 추가"));
+    } catch (err) {
+      onNotice((err as Error).message);
+    }
+  };
+  /** Shift+S or ⌘/Ctrl+Alt+S with frames selected: a section around them. */
+  const wrapInSection = async (ids: string[]) => {
+    try {
+      const sec = await api.createSection({ around: ids });
+      setSelectedSectionIds([sec.id]);
+      setSelectedIds([]);
+      recordSectionMade(sec, t("Add section", "섹션 추가"));
+    } catch (err) {
+      onNotice((err as Error).message);
+    }
+  };
+  const onSectionMoved = useCallback((id: string, before: SectionLayout, after: SectionLayout, moveContents: boolean) => {
+    const put = (l: SectionLayout) => () => api.setSectionLayout(id, l, moveContents).then(() => {});
+    put(after)().catch((err) => onNotice(err.message));
+    record({ label: moveContents ? t("Move section", "섹션 이동") : t("Resize section", "섹션 크기 조절"), undo: put(before), redo: put(after) });
+  }, [api, t, onNotice]); // eslint-disable-line react-hooks/exhaustive-deps
+  const updateSection = (id: string, patch: { title?: string; color?: SectionColor }, label: string) => {
+    const cur = sectionsRef.current[id];
+    if (!cur) return;
+    const back = { ...(patch.title !== undefined ? { title: cur.title } : {}), ...(patch.color !== undefined ? { color: cur.color } : {}) };
+    api.updateSection(id, patch).catch((err) => onNotice(err.message));
+    record({ label, undo: () => api.updateSection(id, back).then(() => {}), redo: () => api.updateSection(id, patch).then(() => {}) });
+  };
+  const onSectionRename = useCallback((id: string, title: string) => updateSection(id, { title }, t("Rename section", "섹션 이름 바꾸기")), [api, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** ⇧⌘G / Ctrl+Shift+G: remove the sections, keep what is in them. */
+  const ungroupSections = async (ids: string[]) => {
+    const gone = ids.map((id) => sectionsRef.current[id]).filter(Boolean) as Section[];
+    for (const sec of gone) await api.deleteSection(sec.id).catch((err) => onNotice(err.message));
+    setSelectedSectionIds([]);
+    if (gone.length)
+      record({
+        label: t("Remove section", "섹션 없애기"),
+        undo: async () => {
+          for (const sec of gone) await reviveSection(sec);
+        },
+        redo: async () => {
+          for (const sec of gone) await api.deleteSection(sec.id).catch(() => {});
+        },
+      });
+  };
+  /** Delete: the sections and what is in them, as in Figma; undo brings all of it back. */
+  const deleteSections = async (ids: string[]) => {
+    const gone = ids.map((id) => sectionsRef.current[id]).filter(Boolean) as Section[];
+    if (!gone.length) return;
+    const inner = Object.values(sectionsRef.current).filter((x) => !ids.includes(x.id) && gone.some((g) => x.layout.x >= g.layout.x && x.layout.y >= g.layout.y && x.layout.x + x.layout.w <= g.layout.x + g.layout.w && x.layout.y + x.layout.h <= g.layout.y + g.layout.h));
+    const toolIds = [...new Set(gone.flatMap((sec) => toolsInSection(sec).map((tl) => tl.id)))];
+    const snap = snapshot(toolIds);
+    for (const sec of gone) await api.deleteSection(sec.id, true).catch((err) => onNotice(err.message));
+    setSelectedSectionIds([]);
+    record({
+      label: t("Delete section", "섹션 삭제"),
+      undo: async () => {
+        for (const sec of [...gone, ...inner].sort((a, b) => b.layout.w * b.layout.h - a.layout.w * a.layout.h)) await reviveSection(sec);
+        await recreate(snap);
+      },
+      redo: async () => {
+        for (const sec of gone) await api.deleteSection(sec.id, true).catch(() => {});
+      },
+    });
+    onNotice(t(`Deleted ${gone.length === 1 ? `"${gone[0].title}"` : `${gone.length} sections`} and ${toolIds.length} frame(s) in it · ${kbd("mod+z")} to undo`, `${gone.length === 1 ? `"${gone[0].title}"` : `섹션 ${gone.length}개`}와 안의 프레임 ${toolIds.length}개 삭제함 · ${kbd("mod+z")}로 되돌리기`));
+  };
+  /** ⌘/Ctrl+D on a section: a copy beside it, with copies of what is in it. */
+  const duplicateSection = async (id: string) => {
+    const sec = sectionsRef.current[id];
+    if (!sec) return;
+    // The first free place to its right: the copy and the frames in it must not land in another section.
+    const taken = [
+      ...Object.values(sectionsRef.current).map((x) => x.layout),
+      ...tools.filter((tl) => tl.layout).map((tl) => ({ ...tl.layout!, h: rf.getNode(tl.id)?.measured?.height ?? tl.layout!.h ?? 200 })),
+    ];
+    const overlaps = (x: number) => taken.filter((r) => x < r.x + r.w + 40 && r.x - 40 < x + sec.layout.w && sec.layout.y < r.y + r.h + 40 && r.y - 40 < sec.layout.y + sec.layout.h);
+    let x = sec.layout.x + sec.layout.w + 80;
+    for (let i = 0, hit = overlaps(x); hit.length && i < 50; i++, hit = overlaps(x)) x = Math.max(...hit.map((r) => r.x + r.w)) + 80;
+    const dx = x - sec.layout.x;
+    try {
+      const copy = await api.createSection({ title: `${sec.title}${t(" copy", " 사본")}`, color: sec.color, layout: { ...sec.layout, x } });
+      recordSectionMade(copy, t("Duplicate section", "섹션 복제"));
+      const inside = toolsInSection(sec).filter((tl) => tl.layout);
+      if (inside.length) {
+        const minX = Math.min(...inside.map((tl) => tl.layout!.x));
+        const minY = Math.min(...inside.map((tl) => tl.layout!.y));
+        await copyTools(inside, { x: minX + dx, y: minY });
+      }
+      setSelectedSectionIds([copy.id]);
+      setSelectedIds([]);
+    } catch (err) {
+      onNotice((err as Error).message);
+    }
+  };
+  const sendSections = (ids: string[]) => {
+    setSendSectionIds(ids);
+    setSendIds([]);
+  };
+  const fitSections = (ids: string[]) => {
+    const ls = ids.map((id) => sectionsRef.current[id]?.layout).filter(Boolean) as SectionLayout[];
+    if (!ls.length) return;
+    const x = Math.min(...ls.map((l) => l.x));
+    const y = Math.min(...ls.map((l) => l.y));
+    rf.fitBounds({ x, y, width: Math.max(...ls.map((l) => l.x + l.w)) - x, height: Math.max(...ls.map((l) => l.y + l.h)) - y }, { padding: 0.12, duration: 300 });
+  };
 
   /** Delete at once, as Figma does; ⌘/Ctrl+Z brings the frames back (with their links). */
   const removeTools = useCallback(
@@ -339,6 +490,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
+      adding.current = e.shiftKey || e.metaKey || e.ctrlKey;
       const el = document.activeElement;
       // Esc while editing inside a frame: stop editing and select that frame (as leaving a text in Figma).
       if (e.key === "Escape" && isEditable(el) && el?.closest(".react-flow__node") && !document.querySelector('[role="menu"], .modal')) {
@@ -363,16 +515,23 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       else if (plain && !e.shiftKey && code === "KeyB") (take(), addTool("browser"));
       else if (plain && e.shiftKey && code === "Digit0") (take(), cam.zoomTo(1));
       else if (plain && e.shiftKey && code === "Digit1") (take(), cam.fitAll());
-      else if (plain && e.shiftKey && code === "Digit2") (take(), selectedIds.length ? fitTo(selectedIds) : cam.fitAll());
+      else if (plain && e.shiftKey && code === "Digit2") (take(), selectedIds.length ? fitTo(selectedIds) : selectedSectionIds.length ? fitSections(selectedSectionIds) : cam.fitAll());
+      else if (plain && e.shiftKey && code === "KeyS") (take(), selectedIds.length ? wrapInSection(selectedIds) : setTool("section"));
+      else if (mod && e.altKey && code === "KeyS" && selectedIds.length) (take(), wrapInSection(selectedIds));
+      else if (mod && e.shiftKey && code === "KeyG" && selectedSectionIds.length) (take(), ungroupSections(selectedSectionIds));
       else if (mod && (code === "Equal" || code === "NumpadAdd")) (take(), cam.zoomIn());
       else if (mod && (code === "Minus" || code === "NumpadSubtract")) (take(), cam.zoomOut());
       else if (mod && code === "Digit0") (take(), cam.zoomTo(1));
       else if (mod && !e.shiftKey && code === "KeyZ") (take(), runHistory("undo"));
       else if ((mod && e.shiftKey && code === "KeyZ") || (e.ctrlKey && !e.metaKey && code === "KeyY")) (take(), runHistory("redo"));
       else if (mod && !e.shiftKey && code === "KeyA") (take(), setSelectedIds(tools.map((tl) => tl.id)));
-      else if (mod && !e.shiftKey && code === "KeyD" && selectedIds.length) (take(), duplicate(selectedIds));
+      else if (mod && !e.shiftKey && code === "KeyD" && (selectedIds.length || selectedSectionIds.length)) {
+        take();
+        if (selectedIds.length) duplicate(selectedIds);
+        for (const id of selectedSectionIds) duplicateSection(id);
+      }
       else if (mod && code === "Backslash") (take(), setInspectorOpen(!inspectorOpen));
-      else if (mod && code === "Enter" && selectedIds.length) (take(), setSendIds(selectedIds));
+      else if (mod && code === "Enter" && (selectedIds.length || selectedSectionIds.length)) (take(), setSendSectionIds(selectedSectionIds), setSendIds(selectedIds));
       else if ((plain && e.shiftKey && code === "Slash") || (mod && code === "Slash")) (take(), setShortcutsOpen(true));
       else if (plain && !e.shiftKey && code === "Slash") (take(), document.getElementById("cmd-input")?.focus());
       else if (plain && code === "Enter" && selectedIds.length === 1) {
@@ -382,13 +541,18 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       } else if (e.key === "Escape") {
         if (tool !== "select") setTool("select");
         setSelectedIds([]);
-      } else if ((e.key === "Delete" || e.key === "Backspace") && (selectedIds.length || selectedLinkIds.length)) {
+        setSelectedSectionIds([]);
+      } else if ((e.key === "Delete" || e.key === "Backspace") && (selectedIds.length || selectedLinkIds.length || selectedSectionIds.length)) {
         take();
         for (const id of selectedLinkIds) api.deleteLink(id).catch((err) => onNotice(err.message));
-        if (selectedIds.length) removeTools(selectedIds);
+        if (selectedSectionIds.length) deleteSections(selectedSectionIds);
+        else if (selectedIds.length) removeTools(selectedIds);
       }
     };
-    const onKeyUp = (e: KeyboardEvent) => e.code === "Space" && setSpaceHeld(false);
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") setSpaceHeld(false);
+      adding.current = e.shiftKey || e.metaKey || e.ctrlKey;
+    };
     const onBlur = () => setSpaceHeld(false);
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
@@ -464,6 +628,33 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     ];
   };
 
+  const COLOR_NAMES: Record<SectionColor, [string, string]> = {
+    gray: ["Gray", "회색"],
+    red: ["Red", "빨강"],
+    orange: ["Orange", "주황"],
+    yellow: ["Yellow", "노랑"],
+    green: ["Green", "초록"],
+    blue: ["Blue", "파랑"],
+    violet: ["Violet", "보라"],
+    pink: ["Pink", "분홍"],
+  };
+  const sectionMenuItems = (sec: Section): MenuItem[] => {
+    const inside = toolsInSection(sec);
+    return [
+      { label: t("Send section to Claude…", "섹션을 Claude에게 보내기…"), hint: kbd("mod+enter"), strong: true, onSelect: () => sendSections([sec.id]) },
+      { separator: true },
+      { label: t("Zoom to section", "섹션에 맞추기"), hint: kbd("shift+2"), onSelect: () => fitSections([sec.id]) },
+      { label: t(`Select the ${inside.length} frame(s) in it`, `안의 프레임 ${inside.length}개 선택`), disabled: !inside.length, onSelect: () => (setSelectedSectionIds([]), setSelectedIds(inside.map((tl) => tl.id))) },
+      { label: t("Rename (double-click the name)", "이름 바꾸기 (이름 더블클릭)"), onSelect: () => (setSelectedSectionIds([sec.id]), setInspectorOpen(true), window.setTimeout(() => (document.getElementById("insp-section-title") as HTMLInputElement | null)?.select(), 50)) },
+      { separator: true },
+      ...SECTION_COLORS.map((c) => ({ label: `${sec.color === c ? "✓ " : "\u2003"}${t(COLOR_NAMES[c][0], COLOR_NAMES[c][1])}`, onSelect: () => updateSection(sec.id, { color: c }, t("Section color", "섹션 색")) })),
+      { separator: true },
+      { label: t("Duplicate", "복제"), hint: kbd("mod+d"), onSelect: () => duplicateSection(sec.id) },
+      { label: t("Remove section (keep what is in it)", "섹션만 없애기 (안의 것은 남김)"), hint: kbd("mod+shift+g"), onSelect: () => ungroupSections([sec.id]) },
+      { label: t("Delete section and what is in it", "섹션과 안의 것 삭제"), hint: kbd("delete"), danger: true, onSelect: () => deleteSections([sec.id]) },
+    ];
+  };
+
   const menuItems = (m: Menu): MenuItem[] => {
     const targets = m.ids.map((id) => toolsById[id]).filter(Boolean) as Tool[];
     if (!targets.length) {
@@ -471,6 +662,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         { label: t("+ Note here", "+ 메모 여기에"), hint: "N", onSelect: () => addTool("note", m.at) },
         { label: t("+ Checklist here", "+ 체크리스트 여기에"), hint: "C", onSelect: () => addTool("checklist", m.at) },
         { label: t("+ Browser here", "+ 브라우저 여기에"), hint: "B", onSelect: () => addTool("browser", m.at) },
+        { label: t("+ Section here", "+ 섹션 여기에"), hint: kbd("shift+s"), onSelect: () => drawSection({ x: Math.round(m.at.x), y: Math.round(m.at.y), w: 640, h: 420 }) },
         ...(copied ? [{ label: t("Paste here", "여기에 붙여넣기"), hint: kbd("mod+v"), onSelect: () => copyTools(copied!.tools, m.at) }] : []),
         { label: libraryOpen ? t("Close library", "라이브러리 닫기") : t("Open library", "라이브러리 열기"), onSelect: () => setLibraryOpen(!libraryOpen) },
         { separator: true },
@@ -518,6 +710,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         },
       },
       { label: targets.length > 1 ? t(`Duplicate ${targets.length}`, `복제 (${targets.length}개)`) : t("Duplicate", "복제"), hint: kbd("mod+d"), onSelect: () => duplicate(ids) },
+      { label: t("Put in a new section", "새 섹션으로 묶기"), hint: kbd("shift+s"), onSelect: () => wrapInSection(ids) },
       {
         label: allRead ? t("Let the agent edit", "agent가 수정할 수 있게") : t("Agent can only read", "agent는 읽기만"),
         onSelect: () => ids.forEach((id) => api.updateTool(id, { agentAccess: allRead ? "write" : "read" }).catch((err) => onNotice(err.message))),
@@ -570,6 +763,13 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
             onPointer={onPointer}
             onCommit={onCommit}
             onRename={onRename}
+            sections={sections}
+            selectedSectionIds={selectedSectionIds}
+            onSelectSections={onSelectSections}
+            onSectionMenu={(pos, id) => setSectionMenu({ ...pos, id })}
+            onDrawSection={drawSection}
+            onSectionMoved={onSectionMoved}
+            onSectionRename={onSectionRename}
             showMinimap={minimap}
             tool={tool}
             links={links}
@@ -626,11 +826,12 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
                 onTool={setTool}
                 tools={tools}
                 selected={selected}
+                selectedSections={selectedSections}
                 onAdd={(k) => addTool(k)}
                 onShortcuts={() => setShortcutsOpen(true)}
                 onSend={async (prompt) => {
                   try {
-                    const r = await api.sendToAgent(prompt, selectedIds);
+                    const r = await api.sendToAgent(prompt, selectedIds, selectedSectionIds);
                     onNotice(r.mode === "claude" ? t("Sent to Claude.", "Claude에게 보냈습니다.") : t("Started Claude in the terminal with your request.", "터미널에서 Claude를 시작해 요청을 보냈습니다."));
                     onSentToClaude(r.mode);
                   } catch (err) {
@@ -647,6 +848,16 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         <Inspector
           onCollapse={() => setInspectorOpen(false)}
           selected={selected}
+          selectedSections={selectedSections}
+          sections={sections}
+          sectionTools={toolsInSection}
+          onSectionRename={onSectionRename}
+          onSectionColor={(id, color) => updateSection(id, { color }, t("Section color", "섹션 색"))}
+          onSectionSend={sendSections}
+          onSectionFit={fitSections}
+          onSectionUngroup={ungroupSections}
+          onSectionDelete={deleteSections}
+          onPickSection={(id) => (setSelectedSectionIds([id]), setSelectedIds([]), fitSections([id]))}
           tools={tools}
           channels={channels}
           events={events}
@@ -691,11 +902,21 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
           onClose={() => setLinkMenu(null)}
         />
       )}
+      {sectionMenu && sectionsById[sectionMenu.id] && (
+        <ContextMenu
+          x={sectionMenu.x}
+          y={sectionMenu.y}
+          title={sectionsById[sectionMenu.id].title}
+          items={sectionMenuItems(sectionsById[sectionMenu.id])}
+          onClose={() => setSectionMenu(null)}
+        />
+      )}
       {sendIds && (
         <SendToClaudeDialog
           tools={sendIds.map((id) => toolsById[id]).filter(Boolean) as Tool[]}
+          sections={sendSectionIds.map((id) => sectionsById[id]).filter(Boolean) as Section[]}
           status={agentStatus}
-          onClose={() => setSendIds(null)}
+          onClose={() => (setSendIds(null), setSendSectionIds([]))}
           onNotice={onNotice}
           onSent={onSentToClaude}
           onOpenTerminal={onOpenTerminal}
@@ -812,11 +1033,13 @@ function CommandBar({
   onShortcuts,
   onSend,
   onNotice,
+  selectedSections,
 }: {
   tool: CanvasTool;
   onTool: (t: CanvasTool) => void;
   tools: Tool[];
   selected: Tool[];
+  selectedSections: Section[];
   onAdd: (k: "note" | "checklist" | "browser") => void;
   onShortcuts: () => void;
   onSend: (prompt: string) => Promise<void>;
@@ -911,6 +1134,18 @@ function CommandBar({
             <path d="M8.5 3.5h4v4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
+        <button
+          className={tool === "section" ? "tool on" : "tool"}
+          aria-pressed={tool === "section"}
+          onClick={() => onTool("section")}
+          aria-label={t("Section", "섹션")}
+          data-tip={`${t("Section", "섹션")}   ${kbd("shift+s")}`}
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+            <rect x="2" y="3.5" width="12" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+            <rect x="3.6" y="1.6" width="5" height="3.2" rx="1" fill="currentColor" />
+          </svg>
+        </button>
       </div>
       <span className="sep" />
       <button className="ghost" onClick={() => onAdd("note")} data-tip={`${t("Note", "메모")}   N`}>
@@ -923,9 +1158,11 @@ function CommandBar({
         {t("+ Browser", "+ 브라우저")}
       </button>
       <span className="sep" />
-      {selected.length > 0 && (
-        <span className="ctx-chip" title={selected.map((tl) => tl.title).join(", ")}>
-          {t(`${selected.length} selected attached`, `선택 ${selected.length}개 포함`)}
+      {selected.length + selectedSections.length > 0 && (
+        <span className="ctx-chip" title={[...selectedSections.map((x) => x.title), ...selected.map((tl) => tl.title)].join(", ")}>
+          {selectedSections.length
+            ? t(`${selectedSections.length} section(s) attached`, `섹션 ${selectedSections.length}개 포함`)
+            : t(`${selected.length} selected attached`, `선택 ${selected.length}개 포함`)}
         </span>
       )}
       <div className="cmd-input">

@@ -23,6 +23,14 @@ import {
   type Link,
   type LinkDirection,
   LINK_DIRECTIONS,
+  frameAnchor,
+  inSection,
+  SECTION_COLORS,
+  SECTION_MIN,
+  sectionInside,
+  type Section,
+  type SectionColor,
+  type SectionLayout,
   TOOL_NAME,
   type Tool,
   type ToolKind,
@@ -48,6 +56,8 @@ type Change =
   | { type: "channel_deleted"; name: string }
   | { type: "link"; link: Link }
   | { type: "link_deleted"; linkId: string }
+  | { type: "section"; section: Section }
+  | { type: "section_deleted"; sectionId: string }
   | { type: "event"; event: BoardEvent };
 
 interface Persisted {
@@ -57,6 +67,7 @@ interface Persisted {
   seq: number;
   channels?: Channel[];
   links?: Link[];
+  sections?: Section[];
 }
 
 const MAX_EVENTS = 500;
@@ -75,6 +86,7 @@ const AGENT_FACING: BoardEventType[] = [
   "channel_deleted",
   "browser",
   "link",
+  "section",
 ];
 
 export interface AppLog {
@@ -91,6 +103,7 @@ export class Board {
   private asks = new Map<string, Ask>();
   private channels = new Map<string, Channel>();
   private links = new Map<string, Link>();
+  private sections = new Map<string, Section>();
   /** The newest event, if it may absorb a repeat of itself (see log's coalesce). */
   private coalescible: { key: string; seq: number } | null = null;
   private events: BoardEvent[] = [];
@@ -127,6 +140,7 @@ export class Board {
       // Boards from before names: every tool gets one, oldest first (note1, browser1, …).
       for (const t of [...this.tools.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) if (!t.name) t.name = this.defaultName(t.kind);
       for (const l of data.links ?? []) if (this.tools.has(l.from) && this.tools.has(l.to)) this.links.set(l.id, l);
+      for (const sec of data.sections ?? []) this.sections.set(sec.id, sec);
       this.events = data.events ?? [];
       this.seq = data.seq ?? this.events.at(-1)?.seq ?? 0;
       this.agentCursor = this.seq;
@@ -146,6 +160,7 @@ export class Board {
         seq: this.seq,
         channels: [...this.channels.values()],
         links: [...this.links.values()],
+        sections: [...this.sections.values()],
       };
       mkdirSync(dirname(this.file), { recursive: true });
       const tmp = `${this.file}.tmp`;
@@ -197,6 +212,7 @@ export class Board {
       events: this.events.slice(-100),
       channels: [...this.channels.values()],
       links: [...this.links.values()],
+      sections: [...this.sections.values()],
     };
   }
 
@@ -226,18 +242,27 @@ export class Board {
     return undefined;
   }
 
-  /** kind + the first free number: note1, note2, browser1… */
-  private defaultName(kind: string) {
-    for (let n = 1; ; n++) if (!this.byName(`${kind}${n}`)) return `${kind}${n}`;
+  private sectionByName(ref: string): Section | undefined {
+    const want = String(ref ?? "").trim().replace(/^@/, "").toLowerCase();
+    if (!want) return undefined;
+    for (const sec of this.sections.values()) if (sec.name.toLowerCase() === want) return sec;
+    return undefined;
   }
 
-  /** A valid name nobody else on the board has (case does not matter). */
+  /** kind + the first free number: note1, note2, browser1, section1… (tools and sections share names) */
+  private defaultName(kind: string) {
+    for (let n = 1; ; n++) if (!this.byName(`${kind}${n}`) && !this.sectionByName(`${kind}${n}`)) return `${kind}${n}`;
+  }
+
+  /** A valid name nobody else on the board has, tool or section (case does not matter). */
   private checkName(name: string, self?: string): string {
     const n = String(name ?? "").trim().replace(/^@/, "");
     if (!TOOL_NAME.test(n)) throw new BoardError(`"${n}" can't be a name: use letters, digits, _ . - (no spaces), up to 40, e.g. research or 리서치_메모`);
     const other = this.byName(n);
     if (other && other.id !== self) throw new BoardError(`another tool is already named @${other.name} ("${other.title}")`, 409);
-    if (this.tools.has(n) && n !== self) throw new BoardError(`"${n}" is a tool's id; pick another name`, 409);
+    const sec = this.sectionByName(n);
+    if (sec && sec.id !== self) throw new BoardError(`a section is already named @${sec.name} ("${sec.title}")`, 409);
+    if ((this.tools.has(n) || this.sections.has(n)) && n !== self) throw new BoardError(`"${n}" is an id; pick another name`, 409);
     return n;
   }
 
@@ -403,6 +428,143 @@ export class Board {
     }
     this.emit({ type: "tool_deleted", toolId: t.id });
     this.log(actor, "tool_deleted", [`Deleted "${t.title}"`, `"${t.title}" 도구 삭제`], { toolId: t.id });
+  }
+
+  // ── sections: named areas that group tools (Figma's sections) ─────────────
+  // A tool belongs to a section when the middle of its top part lies inside it (frameAnchor), so a tool put there by
+  // anyone belongs at once. Sections inside a section move with it.
+  listSections() {
+    return [...this.sections.values()];
+  }
+
+  /** A section by id or by name ("research" or "@research"). */
+  getSection(ref: string): Section {
+    const sec = this.sections.get(ref) ?? this.sectionByName(ref);
+    if (!sec) {
+      const known = this.listSections().map((x) => `@${x.name} (${x.id}, "${x.title}")`).join(", ") || "none";
+      throw new BoardError(`section "${ref}" not found. Sections: ${known}`, 404);
+    }
+    return sec;
+  }
+
+  /** The tools in a section (sections inside it included). */
+  toolsIn(sectionId: string): Tool[] {
+    const sec = this.getSection(sectionId);
+    return this.listTools().filter((t) => t.layout && inSection(frameAnchor(t.layout), sec.layout));
+  }
+
+  /** The smallest section a tool is in, if any. */
+  sectionOf(toolId: string): Section | undefined {
+    const t = this.tools.get(toolId);
+    if (!t?.layout) return undefined;
+    const p = frameAnchor(t.layout);
+    return this.listSections()
+      .filter((sec) => inSection(p, sec.layout))
+      .sort((a, b) => a.layout.w * a.layout.h - b.layout.w * b.layout.h)[0];
+  }
+
+  private sectionLayout(input: Partial<SectionLayout>, cur?: SectionLayout): SectionLayout {
+    const num = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v) : fallback);
+    const lim = (v: number) => Math.max(-100_000, Math.min(100_000, v));
+    return {
+      x: lim(num(input.x, cur?.x ?? 0)),
+      y: lim(num(input.y, cur?.y ?? 0)),
+      w: Math.max(SECTION_MIN.w, Math.min(40_000, num(input.w, cur?.w ?? 640))),
+      h: Math.max(SECTION_MIN.h, Math.min(40_000, num(input.h, cur?.h ?? 420))),
+    };
+  }
+
+  private checkColor(c: unknown): SectionColor {
+    if (!SECTION_COLORS.includes(c as SectionColor)) throw new BoardError(`color must be one of: ${SECTION_COLORS.join(", ")}`);
+    return c as SectionColor;
+  }
+
+  /** A new section: around some tools (with room for its label), or at a given place and size. */
+  createSection(actor: Actor, input: { title?: string; name?: string; color?: SectionColor; around?: string[]; layout?: Partial<SectionLayout>; id?: string }): Section {
+    let layout: SectionLayout;
+    if (input.around?.length) {
+      const ts = input.around.map((ref) => this.getTool(ref)).filter((t) => t.layout);
+      if (!ts.length) throw new BoardError("none of those tools is on the board");
+      const PAD = 48;
+      const x0 = Math.min(...ts.map((t) => t.layout!.x));
+      const y0 = Math.min(...ts.map((t) => t.layout!.y));
+      const x1 = Math.max(...ts.map((t) => t.layout!.x + t.layout!.w));
+      const y1 = Math.max(...ts.map((t) => t.layout!.y + estimateHeight(t)));
+      // Above the tools: each frame's own label (about 24 px). The section's name sits outside, above it.
+      layout = this.sectionLayout({ x: x0 - PAD, y: y0 - PAD - 28, w: x1 - x0 + PAD * 2, h: y1 - y0 + PAD * 2 + 28 });
+    } else if (input.layout) layout = this.sectionLayout(input.layout);
+    else throw new BoardError("give the tools it goes around (around: [toolId…]) or its place and size (x, y, w, h)");
+    const id = input.id && !this.sections.has(input.id) && !this.tools.has(input.id) ? input.id : shortId("sec");
+    const name = input.name ? this.checkName(input.name) : this.defaultName("section");
+    const title = (input.title ?? "").trim().slice(0, 80) || `Section ${name.replace(/^section/, "")}`;
+    const sec: Section = { id, name, title, color: input.color ? this.checkColor(input.color) : "gray", layout, createdBy: actor, createdAt: now(), updatedAt: now() };
+    this.sections.set(sec.id, sec);
+    this.emit({ type: "section", section: sec });
+    this.log(actor, "section", [`Made section "${sec.title}" (@${sec.name})`, `"${sec.title}" 섹션 만듦`], { sectionId: sec.id });
+    return sec;
+  }
+
+  updateSection(actor: Actor, ref: string, input: { title?: string; name?: string; color?: SectionColor }): Section {
+    const sec = this.getSection(ref);
+    const next: Section = {
+      ...sec,
+      ...(input.title !== undefined ? { title: String(input.title).trim().slice(0, 80) || sec.title } : {}),
+      ...(input.name !== undefined ? { name: this.checkName(input.name, sec.id) } : {}),
+      ...(input.color !== undefined ? { color: this.checkColor(input.color) } : {}),
+      updatedAt: now(),
+    };
+    this.sections.set(sec.id, next);
+    this.emit({ type: "section", section: next });
+    if (next.title !== sec.title || next.name !== sec.name)
+      this.log(actor, "section", [`Renamed section "${sec.title}" to "${next.title}" (@${next.name})`, `섹션 이름 변경: "${sec.title}" → "${next.title}"`], { sectionId: sec.id });
+    return next;
+  }
+
+  /**
+   * Move or resize a section. moveContents: a move takes the tools and sections in it along (by where they are before
+   * it moves), as dragging a section does in Figma; a resize leaves them where they are. Presentation, like a frame's
+   * layout: no event for the agent.
+   */
+  setSectionLayout(ref: string, input: Partial<SectionLayout>, moveContents = false): { section: Section; moved: string[] } {
+    const sec = this.getSection(ref);
+    const layout = this.sectionLayout(input, sec.layout);
+    const dx = layout.x - sec.layout.x;
+    const dy = layout.y - sec.layout.y;
+    const moved: string[] = [];
+    if (moveContents && (dx || dy)) {
+      for (const t of this.toolsIn(sec.id)) {
+        this.setLayout(t.id, { x: t.layout!.x + dx, y: t.layout!.y + dy });
+        moved.push(t.id);
+      }
+      for (const inner of this.listSections()) {
+        if (inner.id === sec.id || !sectionInside(inner.layout, sec.layout)) continue;
+        const next = { ...inner, layout: { ...inner.layout, x: inner.layout.x + dx, y: inner.layout.y + dy }, updatedAt: now() };
+        this.sections.set(inner.id, next);
+        this.emit({ type: "section", section: next });
+        moved.push(inner.id);
+      }
+    }
+    const next = { ...sec, layout, updatedAt: now() };
+    this.sections.set(sec.id, next);
+    this.emit({ type: "section", section: next });
+    return { section: next, moved };
+  }
+
+  /** Remove a section. withContents (the person only): its tools and the sections inside go too. */
+  deleteSection(actor: Actor, ref: string, withContents = false) {
+    const sec = this.getSection(ref);
+    if (withContents) {
+      if (actor !== "human") throw new BoardError("only the person can delete a section with what is in it; the agent removes just the section", 403);
+      for (const t of this.toolsIn(sec.id)) this.deleteTool(actor, t.id);
+      for (const inner of this.listSections()) {
+        if (inner.id === sec.id || !sectionInside(inner.layout, sec.layout)) continue;
+        this.sections.delete(inner.id);
+        this.emit({ type: "section_deleted", sectionId: inner.id });
+      }
+    }
+    this.sections.delete(sec.id);
+    this.emit({ type: "section_deleted", sectionId: sec.id });
+    this.log(actor, "section", [`Removed section "${sec.title}"${withContents ? " and what was in it" : ""}`, `"${sec.title}" 섹션 삭제${withContents ? " (안의 도구 포함)" : ""}`], { sectionId: sec.id });
   }
 
   // ── links: lines between tools ────────────────────────────────────────────

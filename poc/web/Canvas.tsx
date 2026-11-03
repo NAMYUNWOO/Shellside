@@ -9,6 +9,7 @@ import {
   Handle,
   MiniMap,
   NodeResizeControl,
+  NodeResizer,
   Position,
   ReactFlow,
   ResizeControlVariant,
@@ -30,7 +31,7 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { BROWSER_HEIGHT, BROWSER_WIDTH, type Layout, type Link, type LinkDirection, type Tool } from "../shared/catalog.ts";
+import { BROWSER_HEIGHT, BROWSER_WIDTH, frameAnchor, inSection, SECTION_MIN, sectionInside, type Layout, type Link, type LinkDirection, type Section, type SectionLayout, type Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { ToolBody } from "./tools.tsx";
 import { kindLabel, useT } from "./i18n.tsx";
@@ -59,10 +60,19 @@ export interface LayoutChange {
   after: Partial<Layout>;
 }
 type FrameNode = Node<FrameData, "frame">;
+interface SectionData extends Record<string, unknown> {
+  section: Section;
+  selected: boolean;
+  onRename: (sectionId: string, title: string) => void;
+  onResized: (sectionId: string, before: SectionLayout, after: SectionLayout) => void;
+}
+type SectionNode = Node<SectionData, "section">;
+type AnyNode = FrameNode | SectionNode;
 type LinkEdge = Edge<{ direction: LinkDirection }, "link">;
 
-/** select: drag on empty space draws a selection box. hand: drag anywhere pans. link: drag from a frame to another. */
-export type CanvasTool = "select" | "hand" | "link";
+/** select: drag on empty space draws a selection box. hand: drag anywhere pans. link: drag from a frame to another.
+ *  section: drag to draw a section (Shift+S). */
+export type CanvasTool = "select" | "hand" | "link" | "section";
 
 const viewportKey = (boardId: string) => `wb.viewport.${boardId}`;
 function savedViewport(boardId: string): Viewport | undefined {
@@ -104,10 +114,20 @@ interface BoardCanvasProps {
   onRename: (toolId: string, title: string) => void;
   /** The pointer moved over the canvas (client coordinates): new frames from N / C / B and paste go there. */
   onPointer: (p: { x: number; y: number } | null) => void;
+  /** Sections (biggest first) and the ones selected (sections are selected here, not by React Flow). */
+  sections: Section[];
+  selectedSectionIds: string[];
+  onSelectSections: (ids: string[], additive: boolean) => void;
+  onSectionMenu: (e: { x: number; y: number }, sectionId: string) => void;
+  /** Drawn with the section tool (board coordinates). */
+  onDrawSection: (layout: SectionLayout) => void;
+  /** A section was dragged (its contents went along) or resized: save it and keep it for undo. */
+  onSectionMoved: (sectionId: string, before: SectionLayout, after: SectionLayout, moveContents: boolean) => void;
+  onSectionRename: (sectionId: string, title: string) => void;
   children?: React.ReactNode; // <Panel> overlays
 }
 
-const nodeTypes = { frame: FrameView };
+const nodeTypes = { frame: FrameView, section: SectionView };
 const edgeTypes = { link: LinkLine };
 
 export function BoardCanvas(props: BoardCanvasProps) {
@@ -115,8 +135,19 @@ export function BoardCanvas(props: BoardCanvasProps) {
   const t = useT();
   const { boardId, tools, selectedIds, onSelect, activeIds, waitingIds, appErrors, onAppErrors, onInteract, onNotice, onCommit, onRename } = props;
   const linking = props.tool === "link";
-  const rf = useReactFlow<FrameNode>();
-  const [nodes, setNodes] = useState<FrameNode[]>([]);
+  const rf = useReactFlow<AnyNode>();
+  const [nodes, setNodes] = useState<AnyNode[]>([]);
+  const { sections, selectedSectionIds, onSectionMoved, onSectionRename } = props;
+  // Sections we moved or resized but the server has not echoed yet; and what a section drag carries along.
+  const pendingSections = useRef(new Map<string, { layout: SectionLayout; until: number }>());
+  const sectionDrag = useRef<{ id: string; from: SectionLayout; members: Map<string, { x: number; y: number }> } | null>(null);
+  const onSectionResized = useCallback(
+    (id: string, before: SectionLayout, after: SectionLayout) => {
+      pendingSections.current.set(id, { layout: after, until: Date.now() + 2000 });
+      onSectionMoved(id, before, after, false);
+    },
+    [onSectionMoved],
+  );
   const initialViewport = useRef(savedViewport(boardId));
   const selectedSet = useRef(new Set<string>());
   selectedSet.current = new Set(selectedIds);
@@ -135,11 +166,39 @@ export function BoardCanvas(props: BoardCanvasProps) {
     [onNotice, api, t],
   );
 
-  // Server tools → React Flow nodes, keeping React Flow's own bookkeeping (measured size, dragging, resizing).
+  // Server tools and sections → React Flow nodes, keeping React Flow's own bookkeeping (measured size, dragging,
+  // resizing). Sections come first and sit behind the frames; only their label takes the pointer (see the CSS), so a
+  // drag on a section's empty space draws a selection box, as in Figma.
   useEffect(() => {
     setNodes((prev) => {
       const byId = new Map(prev.map((n) => [n.id, n]));
-      return tools
+      const carried = sectionDrag.current?.members;
+      const secNodes = sections.map((sec) => {
+        const p = byId.get(sec.id) as SectionNode | undefined;
+        let L = sec.layout;
+        const pend = pendingSections.current.get(sec.id);
+        if (pend) {
+          const echoed = (["x", "y", "w", "h"] as const).every((k) => L[k] === pend.layout[k]);
+          if (echoed || Date.now() > pend.until) pendingSections.current.delete(sec.id);
+          else L = pend.layout;
+        }
+        return {
+          ...p,
+          id: sec.id,
+          type: "section",
+          position: p?.dragging || carried?.has(sec.id) ? p!.position : { x: L.x, y: L.y },
+          width: p?.resizing ? p.width : L.w,
+          height: p?.resizing ? p.height : L.h,
+          zIndex: -1,
+          selectable: false,
+          connectable: false,
+          focusable: false,
+          draggable: props.tool === "select",
+          dragHandle: ".section-label",
+          data: { section: sec, selected: selectedSectionIds.includes(sec.id), onRename: onSectionRename, onResized: onSectionResized },
+        } as SectionNode;
+      });
+      const frameNodes = tools
         .filter((t) => t.layout)
         .map((t) => {
           const p = byId.get(t.id);
@@ -154,7 +213,7 @@ export function BoardCanvas(props: BoardCanvasProps) {
             ...p,
             id: t.id,
             type: "frame",
-            position: p?.dragging ? p.position : { x: L.x, y: L.y },
+            position: p?.dragging || carried?.has(t.id) ? p!.position : { x: L.x, y: L.y },
             width: p?.resizing ? p.width : L.w,
             // Height follows the content, except browsers: they keep a set height and the page scrolls inside.
             height: p?.resizing ? p.height : t.kind === "browser" ? (L.h ?? BROWSER_HEIGHT.default) : undefined,
@@ -174,8 +233,9 @@ export function BoardCanvas(props: BoardCanvasProps) {
             },
           } as FrameNode;
         });
+      return [...secNodes, ...frameNodes];
     });
-  }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice, linking, onCommit, onRename]);
+  }, [tools, selectedIds, activeIds, waitingIds, appErrors, onAppErrors, onLayout, onNotice, linking, onCommit, onRename, sections, selectedSectionIds, onSectionRename, onSectionResized, props.tool]);
 
   // Board links → React Flow edges. Selection stays React Flow's; LinkLine draws the direction.
   const [edges, setEdges] = useState<LinkEdge[]>([]);
@@ -192,7 +252,7 @@ export function BoardCanvas(props: BoardCanvasProps) {
     setEdges((eds) => applyEdgeChanges(changes.filter((c) => c.type === "select"), eds));
   }, []);
 
-  const onNodesChange = useCallback((changes: NodeChange<FrameNode>[]) => {
+  const onNodesChange = useCallback((changes: NodeChange<AnyNode>[]) => {
     // Frames are deleted by BoardPanel (Delete key, menus, inspector), which can undo it; never by React Flow itself.
     setNodes((nds) => applyNodeChanges(changes.filter((c) => c.type !== "remove"), nds));
   }, []);
@@ -275,7 +335,8 @@ export function BoardCanvas(props: BoardCanvasProps) {
       onPointerMove={(e) => onPointer({ x: e.clientX, y: e.clientY })}
       onPointerLeave={() => onPointer(null)}
     >
-    <ReactFlow<FrameNode, LinkEdge>
+    {props.tool === "section" && <SectionDraw onDraw={props.onDrawSection} />}
+    <ReactFlow<AnyNode, LinkEdge>
       nodes={nodes}
       edges={edges}
       nodeTypes={nodeTypes}
@@ -296,11 +357,45 @@ export function BoardCanvas(props: BoardCanvasProps) {
         setEdges((eds) => eds.map((x) => ({ ...x, selected: x.id === edge.id })));
         props.onLinkMenu({ x: e.clientX, y: e.clientY }, edge.id);
       }}
-      onNodeDragStart={(_e, _node, dragged) => {
+      onNodeDragStart={(_e, node, dragged) => {
         onInteract();
         dragFrom.current = new Map(dragged.map((n) => [n.id, { ...n.position }]));
+        if (node.type !== "section") return;
+        // Dragging a section takes along the frames in it and the sections inside it, by where they are now.
+        const sec = (node as SectionNode).data.section;
+        const from = { ...sec.layout, x: node.position.x, y: node.position.y };
+        const members = new Map<string, { x: number; y: number }>();
+        for (const n of rf.getNodes()) {
+          if (n.id === node.id) continue;
+          if (n.type === "frame" && inSection(frameAnchor({ ...n.position, w: n.measured?.width ?? n.width ?? 0 }), from)) members.set(n.id, { ...n.position });
+          if (n.type === "section" && sectionInside({ ...n.position, w: n.width ?? 0, h: n.height ?? 0 }, from)) members.set(n.id, { ...n.position });
+        }
+        sectionDrag.current = { id: node.id, from, members };
       }}
-      onNodeDragStop={(_e, _node, dragged) => {
+      onNodeDrag={(_e, node) => {
+        const d = sectionDrag.current;
+        if (!d || d.id !== node.id) return;
+        const dx = node.position.x - d.from.x;
+        const dy = node.position.y - d.from.y;
+        setNodes((nds) => nds.map((n) => (d.members.has(n.id) ? { ...n, position: { x: d.members.get(n.id)!.x + dx, y: d.members.get(n.id)!.y + dy } } : n)));
+      }}
+      onNodeDragStop={(_e, node, dragged) => {
+        const d = sectionDrag.current;
+        if (d && d.id === node.id) {
+          const after = { ...d.from, x: Math.round(node.position.x), y: Math.round(node.position.y) };
+          const dx = after.x - Math.round(d.from.x);
+          const dy = after.y - Math.round(d.from.y);
+          // Keep the carried frames where they were dropped until the server's move comes back.
+          for (const [id, p] of d.members) {
+            const n = rf.getNode(id);
+            if (n?.type === "frame") pending.current.set(id, { layout: { x: Math.round(p.x) + dx, y: Math.round(p.y) + dy }, until: Date.now() + 2000 });
+            else if (n?.type === "section") pendingSections.current.set(id, { layout: { ...(n as SectionNode).data.section.layout, x: Math.round(p.x) + dx, y: Math.round(p.y) + dy }, until: Date.now() + 2000 });
+          }
+          pendingSections.current.set(d.id, { layout: after, until: Date.now() + 2000 });
+          sectionDrag.current = null;
+          if (dx || dy) onSectionMoved(d.id, { ...d.from, x: Math.round(d.from.x), y: Math.round(d.from.y) }, after, true);
+          return;
+        }
         const changes: LayoutChange[] = [];
         for (const n of dragged) {
           onLayout(n.id, { x: n.position.x, y: n.position.y });
@@ -311,9 +406,19 @@ export function BoardCanvas(props: BoardCanvasProps) {
         if (changes.length) onCommit(changes);
       }}
       onSelectionChange={onSelectionChange}
-      onPaneClick={() => onSelect([])}
+      onPaneClick={() => {
+        onSelect([]);
+        props.onSelectSections([], false);
+      }}
+      onNodeClick={(e, node) => {
+        if (node.type === "section") props.onSelectSections([node.id], e.shiftKey || e.metaKey || e.ctrlKey);
+      }}
       onNodeContextMenu={(e, node) => {
         e.preventDefault();
+        if (node.type === "section") {
+          if (!selectedSectionIds.includes(node.id)) props.onSelectSections([node.id], false);
+          return props.onSectionMenu({ x: e.clientX, y: e.clientY }, node.id);
+        }
         // Right-clicking outside the current selection targets just that frame, like a file manager.
         const ids = selectedSet.current.has(node.id) ? [...selectedSet.current] : [node.id];
         if (!selectedSet.current.has(node.id)) onSelect([node.id]);
@@ -356,9 +461,9 @@ export function BoardCanvas(props: BoardCanvasProps) {
       // tool pan; Shift (or ⌘/Ctrl) + click adds to the selection.
       selectionOnDrag={props.tool === "select"}
       selectionMode={SelectionMode.Partial}
-      panOnDrag={props.tool === "select" ? [1] : true}
+      panOnDrag={props.tool === "select" || props.tool === "section" ? [1] : true}
       nodesDraggable={props.tool === "select"}
-      elementsSelectable={props.tool !== "hand"}
+      elementsSelectable={props.tool === "select" || props.tool === "link"}
       panActivationKeyCode="Space"
       multiSelectionKeyCode={["Meta", "Control", "Shift"]}
       panOnScroll
@@ -381,7 +486,7 @@ export function BoardCanvas(props: BoardCanvasProps) {
           pannable
           zoomable
           ariaLabel={t("Minimap: the visible area of the whole board", "미니맵: 보드 전체에서 지금 보이는 영역")}
-          nodeColor={(n) => ((n.data as FrameData).tool.createdBy === "agent" ? "#cdbcf3" : "#c9d7e8")}
+          nodeColor={(n) => (n.type === "section" ? "rgba(120, 120, 120, 0.12)" : (n.data as FrameData).tool.createdBy === "agent" ? "#cdbcf3" : "#c9d7e8")}
           nodeBorderRadius={6}
           maskColor="rgba(20, 20, 20, 0.12)"
           maskStrokeColor="#0d99ff"
@@ -453,6 +558,95 @@ function LinkLine({ id, source, target, data, selected }: EdgeProps<LinkEdge>) {
       {atTo && <path className={"link-arrow" + cls} d={head(q, 1)} />}
       {atFrom && <path className={"link-arrow" + cls} d={head(p, -1)} />}
     </>
+  );
+}
+
+// ── sections ──
+/** A section: a tinted area with its name at the top left. Only the label (select, move, rename) and, when selected,
+ *  the resize grips take the pointer; the rest lets clicks and drags through to the canvas. */
+function SectionView({ data, width, height }: NodeProps<SectionNode>) {
+  const t = useT();
+  const zoom = useStore((s) => s.transform[2]);
+  const { section, selected } = data;
+  const [renaming, setRenaming] = useState(false);
+  const from = useRef<SectionLayout>(section.layout);
+  return (
+    <div className={`section-box sec-${section.color}${selected ? " selected" : ""}`} style={{ width, height, ["--z" as string]: zoom }}>
+      <div className="section-label" style={{ transform: `scale(${1 / zoom})` }} title={t(`@${section.name} · drag to move what is in it`, `@${section.name} · 끌면 안의 것들이 함께 움직입니다`)}>
+        {renaming ? (
+          <input
+            className="frame-rename nodrag"
+            defaultValue={section.title}
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              else if (e.key === "Escape") {
+                e.currentTarget.value = section.title;
+                e.currentTarget.blur();
+              }
+              e.stopPropagation();
+            }}
+            onBlur={(e) => {
+              const next = e.currentTarget.value.trim();
+              setRenaming(false);
+              if (next && next !== section.title) data.onRename(section.id, next);
+            }}
+          />
+        ) : (
+          <span onDoubleClick={() => setRenaming(true)}>{section.title}</span>
+        )}
+      </div>
+      <NodeResizer
+        isVisible={selected}
+        minWidth={SECTION_MIN.w}
+        minHeight={SECTION_MIN.h}
+        color="var(--accent)"
+        onResizeStart={(_e, p) => (from.current = { x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.width), h: Math.round(p.height) })}
+        onResizeEnd={(_e, p) => data.onResized(section.id, from.current, { x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.width), h: Math.round(p.height) })}
+      />
+    </div>
+  );
+}
+
+/** The section tool (Shift+S): drag to draw a section; a click makes one of the default size there. */
+function SectionDraw({ onDraw }: { onDraw: (layout: SectionLayout) => void }) {
+  const rf = useReactFlow();
+  const ref = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const local = (e: React.PointerEvent) => {
+    const r = ref.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  return (
+    <div
+      ref={ref}
+      className="section-draw"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        const p = local(e);
+        setBox({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+      }}
+      onPointerMove={(e) => box && setBox({ ...box, ...((p) => ({ x1: p.x, y1: p.y }))(local(e)) })}
+      onPointerUp={(e) => {
+        if (!box) return;
+        const r = ref.current!.getBoundingClientRect();
+        const a = rf.screenToFlowPosition({ x: r.left + Math.min(box.x0, box.x1), y: r.top + Math.min(box.y0, box.y1) });
+        const b = rf.screenToFlowPosition({ x: r.left + Math.max(box.x0, box.x1), y: r.top + Math.max(box.y0, box.y1) });
+        setBox(null);
+        const small = Math.abs(box.x1 - box.x0) < 8 && Math.abs(box.y1 - box.y0) < 8;
+        onDraw(small ? { x: Math.round(a.x), y: Math.round(a.y), w: 640, h: 420 } : { x: Math.round(a.x), y: Math.round(a.y), w: Math.round(b.x - a.x), h: Math.round(b.y - a.y) });
+        e.stopPropagation();
+      }}
+    >
+      {box && (
+        <div
+          className="section-draw-box"
+          style={{ left: Math.min(box.x0, box.x1), top: Math.min(box.y0, box.y1), width: Math.abs(box.x1 - box.x0), height: Math.abs(box.y1 - box.y0) }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -565,7 +759,7 @@ function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
 
 /** Camera moves the board needs: follow the agent, fit everything, drop new tools where the person looks. */
 export function useCanvasActions() {
-  const rf = useReactFlow<FrameNode>();
+  const rf = useReactFlow<AnyNode>();
   const zoom = useStore((s) => s.transform[2]);
   const width = useStore((s) => s.width);
   const height = useStore((s) => s.height);

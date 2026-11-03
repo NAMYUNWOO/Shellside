@@ -139,6 +139,7 @@ certificate):
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
 | Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). It works like Figma: Move tool (V) = an arrow; click a frame to select it, drag its name label or its edge to move it, drag on empty space to select several (box), Shift+click to add. Hand tool (H), or hold Space, = drag anywhere to pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Scroll / two-finger scroll = pan (a scroll that starts over a browser page scrolls the page), ⌘/Ctrl+scroll or pinch = zoom at the pointer, middle-button drag = pan. Drag the right edge = width (a browser frame: its sides and bottom corners); double-click the name = rename |
 | **Right-click menu** | Send to Claude… · Zoom to selection · Rename · Save to library… · Copy name · Copy ID · Copy · Duplicate · Agent access · Delete, each with its shortcut. Right-click empty space = + Note / + Checklist / + Browser here, Paste here |
+| **Sections** | Named, coloured areas that group frames, as in Figma. Shift+S draws one (or puts the selected frames in one). A frame belongs to the section its top part is in, so dragging a frame in or out moves it in or out. Drag a section's name to move it with what is in it; its grips resize it (what is in it stays). Double-click the name to rename it; the properties panel picks its colour. Delete removes it with what is in it (⌘/Ctrl+Z brings it back); ⇧⌘G / Ctrl+Shift+G removes just the section. Send a section to Claude, or write `@section1` |
 | **Zoom menu** (the % at the top) | Zoom in / out, to fit, to the selection, 50 / 100 / 200 %, minimap, properties panel, keyboard shortcuts |
 | Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Shellside mark (a nautilus shell) inside the button while Claude runs in this board's terminal, and `!` when a permission prompt is waiting |
@@ -156,9 +157,11 @@ method on too.
 | View | ⌘/Ctrl + = / − zoom · ⇧0 100% · ⇧1 fit all · ⇧2 fit the selection · ⌘/Ctrl+\ properties panel |
 | Edit | ⌘/Ctrl+Z undo · ⇧⌘Z / Ctrl+Y redo · ⌘/Ctrl+C, X, V copy, cut, paste (frames; the clipboard gets their @names) · ⌘/Ctrl+D duplicate · arrows move 1 (⇧ 10) · Delete · ⌘/Ctrl+A select all · Esc deselect |
 | Frames | Enter = edit the selected frame (its first field) · Esc = stop editing and select it · double-click the name = rename |
+| Sections | Shift+S draw a section, or put the selection in one · ⌘⌥S / Ctrl+Alt+S put the selection in one · ⇧⌘G / Ctrl+Shift+G remove the section, keep what is in it · Delete delete it with what is in it · ⌘/Ctrl+D duplicate it with what is in it |
 | Claude | / = the input box · ⌘/Ctrl+Enter = send the selection · Ctrl+` = terminal |
 
-Undo covers what you do on the canvas (move, resize, add, duplicate, paste, delete, rename), not the agent's edits.
+Undo covers what you do on the canvas (move, resize, add, duplicate, paste, delete, rename; sections too), not the
+agent's edits.
 Delete takes effect at once, as in Figma, and ⌘/Ctrl+Z brings the frames back with their names, content and links
 (with new ids). In the desktop app, the Edit menu's Undo, Redo and Select All act on the board the same way, and
 ⌘/Ctrl + = − 0 zoom the board, not the window.
@@ -195,7 +198,8 @@ When you send:
 | Waiting on a permission prompt or dialog / starting | **Does not send.** Enter could be taken as approving a permission. Says why and opens the terminal |
 
 The selected and `@`-named components are attached to the request as `[WorkBoard] … Tools: - @<name> "<title>" (<kind>, id: <id>)`,
-followed by the links that touch them (`Links: - @notes → @browser1`).
+followed by the links that touch them (`Links: - @notes → @browser1`). A selected section, or one named with `@`,
+brings the tools in it and a `Sections: - @research "Research": @note1, @browser1` line.
 
 Notes save themselves: what you type is the note a moment later (and when you click away), so Claude always reads
 what is on screen. There is no Edit or Save button.
@@ -209,7 +213,12 @@ what is on screen. There is no Edit or Save button.
 `library_list` `library_use` `library_save`
 `browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_network` `browser_network_body` `browser_handoff`
 `link_create` `link_update` `link_delete`
+`section_create` `section_update` `section_delete`
 
+- Sections: `board_list` lists them with the tools in them, `tool_read` says which section a tool is in.
+  `section_create` draws one around given tools (or at x, y, w, h); `section_update` renames, recolours, moves (the
+  tools in it go along) or resizes it; `section_delete` removes it and leaves its tools. Only the person deletes a
+  section with what is in it.
 - Wherever a tool takes a `toolId`, the tool's name works too (`research` or `@research`). `board_list` returns the
   links (`"reads": "@notes → @browser1"`, direction `none` / `forward` / `both`), `tool_read` a tool's own links, and
   `board_wait_event` tells the agent when the person adds, turns or removes one. The agent can change or remove only

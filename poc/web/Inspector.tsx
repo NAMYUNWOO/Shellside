@@ -1,11 +1,22 @@
 // Right panel, like Figma's design panel: the selected frame's properties, or layers + channels + history when nothing is selected.
 import { useEffect, useState } from "react";
-import { describeValue, type BoardEvent, type Channel, type Tool } from "../shared/catalog.ts";
+import { describeValue, SECTION_COLORS, type BoardEvent, type Channel, type Section, type SectionColor, type Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { actorLabel, ago, eventText, kindLabel, useI18n, useT } from "./i18n.tsx";
 
 interface InspectorProps {
   selected: Tool[];
+  selectedSections: Section[];
+  sections: Section[];
+  /** The tools in a section (by where their top part is). */
+  sectionTools: (sec: Section) => Tool[];
+  onSectionRename: (id: string, title: string) => void;
+  onSectionColor: (id: string, color: SectionColor) => void;
+  onSectionSend: (ids: string[]) => void;
+  onSectionFit: (ids: string[]) => void;
+  onSectionUngroup: (ids: string[]) => void;
+  onSectionDelete: (ids: string[]) => void;
+  onPickSection: (id: string) => void;
   tools: Tool[];
   channels: Channel[];
   events: BoardEvent[];
@@ -22,8 +33,15 @@ interface InspectorProps {
 
 export function Inspector(props: InspectorProps) {
   const t = useT();
-  const { selected } = props;
-  const label = selected.length === 1 ? t("Properties", "속성") : selected.length > 1 ? t(`${selected.length} selected`, `${selected.length}개 선택`) : t("Board", "보드");
+  const { selected, selectedSections } = props;
+  const label =
+    selectedSections.length && !selected.length
+      ? t("Section", "섹션")
+      : selected.length === 1
+        ? t("Properties", "속성")
+        : selected.length > 1
+          ? t(`${selected.length} selected`, `${selected.length}개 선택`)
+          : t("Board", "보드");
   return (
     <aside className="inspector nowheel">
       <div className="insp-head">
@@ -32,7 +50,9 @@ export function Inspector(props: InspectorProps) {
           »
         </button>
       </div>
-      {selected.length === 1 ? (
+      {selectedSections.length && !selected.length ? (
+        <SectionInspector key={selectedSections.map((x) => x.id).join()} {...props} />
+      ) : selected.length === 1 ? (
         <ToolInspector key={selected[0].id} {...props} tool={selected[0]} />
       ) : selected.length > 1 ? (
         <MultiInspector {...props} />
@@ -40,6 +60,99 @@ export function Inspector(props: InspectorProps) {
         <Overview {...props} />
       )}
     </aside>
+  );
+}
+
+const SECTION_COLOR_NAMES: Record<SectionColor, [string, string]> = {
+  gray: ["Gray", "회색"],
+  red: ["Red", "빨강"],
+  orange: ["Orange", "주황"],
+  yellow: ["Yellow", "노랑"],
+  green: ["Green", "초록"],
+  blue: ["Blue", "파랑"],
+  violet: ["Violet", "보라"],
+  pink: ["Pink", "분홍"],
+};
+
+/** A selected section: its name and colour, what is in it, and what to do with it. */
+function SectionInspector({ selectedSections, sectionTools, onSectionRename, onSectionColor, onSectionSend, onSectionFit, onSectionUngroup, onSectionDelete, onPick }: InspectorProps) {
+  const t = useT();
+  const sec = selectedSections[0];
+  const ids = selectedSections.map((x) => x.id);
+  const [title, setTitle] = useState(sec.title);
+  useEffect(() => setTitle(sec.title), [sec.title]);
+  const inside = sectionTools(sec);
+  return (
+    <>
+      <section className="insp-section">
+        <div className="insp-kind">
+          {t("Section", "섹션")} <span className="frame-name">@{sec.name}</span>
+        </div>
+        {selectedSections.length === 1 ? (
+          <input
+            id="insp-section-title"
+            className="insp-title"
+            aria-label={t("Section name", "섹션 이름")}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onBlur={() => title.trim() && title !== sec.title && onSectionRename(sec.id, title.trim())}
+            onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && (e.target as HTMLInputElement).blur()}
+          />
+        ) : (
+          <h3 className="insp-multi">{t(`${selectedSections.length} sections`, `섹션 ${selectedSections.length}개`)}</h3>
+        )}
+        <div className="swatches" role="radiogroup" aria-label={t("Color", "색")}>
+          {SECTION_COLORS.map((c) => (
+            <button
+              key={c}
+              role="radio"
+              aria-checked={sec.color === c}
+              className={`swatch sec-${c}${sec.color === c ? " on" : ""}`}
+              title={t(SECTION_COLOR_NAMES[c][0], SECTION_COLOR_NAMES[c][1])}
+              aria-label={t(SECTION_COLOR_NAMES[c][0], SECTION_COLOR_NAMES[c][1])}
+              onClick={() => ids.forEach((id) => onSectionColor(id, c))}
+            />
+          ))}
+        </div>
+      </section>
+      {selectedSections.length === 1 && (
+        <section className="insp-section">
+          <div className="insp-kind">{t(`In it: ${inside.length}`, `안에 있는 것: ${inside.length}`)}</div>
+          <ul className="sel-list">
+            {inside.map((tl) => (
+              <li key={tl.id}>
+                <button className="ghost" onClick={() => onPick(tl.id)}>
+                  <span className="layer-kind">{kindLabel(tl.kind, t)}</span> {tl.title}
+                </button>
+              </li>
+            ))}
+            {!inside.length && <li className="muted">{t("Drag frames into it, or add one inside.", "프레임을 끌어 넣거나 안에 새로 추가하세요.")}</li>}
+          </ul>
+        </section>
+      )}
+      <section className="insp-section insp-actions">
+        <button className="primary wide" onClick={() => onSectionSend(ids)}>
+          {t("Send section to Claude…", "섹션을 Claude에게 보내기…")}
+        </button>
+        <button className="wide" onClick={() => onSectionFit(ids)}>
+          {t("Zoom to section", "섹션에 맞추기")}
+        </button>
+        <button className="wide" onClick={() => onSectionUngroup(ids)}>
+          {t("Remove section, keep what is in it", "섹션만 없애기 (안의 것은 남김)")}
+        </button>
+        <p className="muted small">
+          {t(
+            "Drag the name to move the section and what is in it. Frames you drag in or out join or leave it. Claude can use @" + sec.name + ".",
+            "이름을 끌면 섹션과 안의 것이 함께 움직입니다. 프레임을 끌어 넣거나 빼면 섹션에 들어오고 나갑니다. Claude에게는 @" + sec.name + "로 가리킬 수 있습니다.",
+          )}
+        </p>
+      </section>
+      <section className="insp-section">
+        <button className="danger wide" onClick={() => onSectionDelete(ids)}>
+          {t("Delete section and what is in it", "섹션과 안의 것 삭제")}
+        </button>
+      </section>
+    </>
   );
 }
 
@@ -255,10 +368,24 @@ function NumberField({ value, onCommit }: { value: number; onCommit: (v: number)
   return <input inputMode="numeric" value={v} onChange={(e) => setV(e.target.value)} onBlur={commit} onKeyDown={(e) => e.key === "Enter" && commit()} />;
 }
 
-function Overview({ tools, channels, events, now, onPick }: InspectorProps) {
+function Overview({ tools, channels, events, now, onPick, sections, sectionTools, onPickSection }: InspectorProps) {
   const { t, lang } = useI18n();
   const [tab, setTab] = useState<"layers" | "channels" | "history">("layers");
   const layers = [...tools].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  // Each tool under the smallest section it is in, as layers sit under their section in Figma.
+  const home = new Map<string, string>();
+  for (const sec of [...sections].sort((a, b) => b.layout.w * b.layout.h - a.layout.w * a.layout.h)) for (const tl of sectionTools(sec)) home.set(tl.id, sec.id);
+  const layerRow = (tl: Tool, nested = false) => (
+    <li key={tl.id} className={nested ? "nested" : undefined}>
+      <button onClick={() => onPick(tl.id)}>
+        <span className="layer-kind">{kindLabel(tl.kind, t)}</span>
+        <span className="layer-title">{tl.title}</span>
+        <span className={`layer-who ${tl.updatedBy}`}>
+          {actorLabel(tl.updatedBy, t)} · {ago(tl.updatedAt, now, t)}
+        </span>
+      </button>
+    </li>
+  );
   return (
     <>
       <div className="tabs" role="tablist">
@@ -276,18 +403,18 @@ function Overview({ tools, channels, events, now, onPick }: InspectorProps) {
         <Channels channels={channels} tools={tools} now={now} onPick={onPick} />
       ) : tab === "layers" ? (
         <ul className="layers">
-          {layers.length === 0 && <li className="muted pad">{t("No tools yet.", "도구가 없습니다.")}</li>}
-          {layers.map((tl) => (
-            <li key={tl.id}>
-              <button onClick={() => onPick(tl.id)}>
-                <span className="layer-kind">{kindLabel(tl.kind, t)}</span>
-                <span className="layer-title">{tl.title}</span>
-                <span className={`layer-who ${tl.updatedBy}`}>
-                  {actorLabel(tl.updatedBy, t)} · {ago(tl.updatedAt, now, t)}
-                </span>
+          {layers.length === 0 && !sections.length && <li className="muted pad">{t("No tools yet.", "도구가 없습니다.")}</li>}
+          {sections.map((sec) => (
+            <li key={sec.id} className="layer-section">
+              <button onClick={() => onPickSection(sec.id)}>
+                <span className={`layer-kind swatch-dot sec-${sec.color}`} aria-hidden />
+                <span className="layer-title">{sec.title}</span>
+                <span className="layer-who">@{sec.name}</span>
               </button>
+              <ul>{layers.filter((tl) => home.get(tl.id) === sec.id).map((tl) => layerRow(tl, true))}</ul>
             </li>
           ))}
+          {layers.filter((tl) => !home.has(tl.id)).map((tl) => layerRow(tl))}
         </ul>
       ) : (
         <ol className="history">

@@ -114,26 +114,38 @@ export const isShell = (fg: string) => /^-?(bash|zsh|sh|dash|powershell|pwsh)$/i
  * The tools a request is about: the ones picked on the board, plus any it names ("@research"; an @word that is no
  * tool's name is just text), and the links that touch them, readable ("@note1 → @browser1").
  */
-export function requestTools(board: Board, prompt: string, toolIds: string[]) {
+export function requestTools(board: Board, prompt: string, toolIds: string[], sectionIds: string[] = []) {
   const ids = new Set(toolIds.map((id) => board.getTool(id).id));
   const known = new Set(board.listTools().map((t) => t.id));
+  const sections = new Map(sectionIds.map((id) => [board.getSection(id).id, board.getSection(id)]));
   for (const m of prompt.matchAll(/@([\p{L}\p{N}][\p{L}\p{N}_.-]*)/gu)) {
     // "@notes." at the end of a sentence: try the word without its trailing dots too.
-    const id = [m[1], m[1].replace(/[._-]+$/, "")].map((ref) => board.resolveToolId(ref)).find((x) => known.has(x));
+    const refs = [m[1], m[1].replace(/[._-]+$/, "")];
+    const id = refs.map((ref) => board.resolveToolId(ref)).find((x) => known.has(x));
     if (id) ids.add(id);
+    else
+      for (const ref of refs) {
+        const sec = board.listSections().find((x) => x.name.toLowerCase() === ref.toLowerCase());
+        if (sec) sections.set(sec.id, sec);
+      }
   }
+  // A section stands for the tools in it.
+  for (const sec of sections.values()) for (const t of board.toolsIn(sec.id)) ids.add(t.id);
   return {
     tools: [...ids].map((id) => board.getTool(id)),
     links: board.listLinks().filter((l) => ids.has(l.from) || ids.has(l.to)).map((l) => board.describeLink(l)),
+    sections: [...sections.values()].map((sec) => `@${sec.name} "${sec.title}": ${board.toolsIn(sec.id).map((t) => `@${t.name}`).join(", ") || "empty"}`),
   };
 }
 
-/** links: how these tools are linked on the board, already readable ("@note1 → @browser1"). */
-export function composeRequest(prompt: string, tools: Tool[], links: string[] = []): string {
-  if (!tools.length) return prompt.trim();
+/** links: how these tools are linked on the board, already readable ("@note1 → @browser1"); sections: the sections
+ *  the request is about, with the tools in them. */
+export function composeRequest(prompt: string, tools: Tool[], links: string[] = [], sections: string[] = []): string {
+  if (!tools.length && !sections.length) return prompt.trim();
   const refs = tools.map((t) => `- @${t.name ?? t.id} "${t.title}" (${t.kind}, id: ${t.id})`).join("\n");
   const linked = links.length ? `\nLinks:\n${links.map((l) => `- ${l}`).join("\n")}\n` : "";
-  return `[WorkBoard] A request about tools on the board (selected, or named with @). Read them with the workboard MCP (tool_read, app_snapshot, browser_snapshot).\nTools:\n${refs}\n${linked}\nRequest: ${prompt.trim()}`;
+  const grouped = sections.length ? `\nSections:\n${sections.map((x) => `- ${x}`).join("\n")}\n` : "";
+  return `[WorkBoard] A request about tools on the board (selected, or named with @). Read them with the workboard MCP (tool_read, app_snapshot, browser_snapshot).\nTools:\n${refs || "- (none)"}\n${linked}${grouped}\nRequest: ${prompt.trim()}`;
 }
 
 /** ANSI-C quoting ($'…') keeps newlines on one typed line in bash/zsh. */

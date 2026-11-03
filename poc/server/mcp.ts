@@ -4,7 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { CATALOG_DOC, LINK_DIRECTIONS, TOOL_KINDS, describeValue, formField, type Link, type Tool } from "../shared/catalog.ts";
+import { CATALOG_DOC, LINK_DIRECTIONS, SECTION_COLORS, TOOL_KINDS, describeValue, formField, type Link, type Section, type Tool } from "../shared/catalog.ts";
 import { Board, BoardError } from "./board.ts";
 import { loadSource } from "./apps.ts";
 import type { Library } from "./library.ts";
@@ -59,7 +59,8 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         "Apps share data live through channels (useChannel) and can read any tool (useTool): connect apps that way instead of merging them or relaying data yourself. " +
         "For web pages, use the board browser (browser_open, browser_snapshot, browser_act): the person watches and can take over. " +
         "Every tool has a name the person uses to point at it (\"@research\"); a name works wherever a toolId is asked. " +
-        "The person can link tools (board_list → links): a forward link from → to means take from the first and act on the second.",
+        "The person can link tools (board_list → links): a forward link from → to means take from the first and act on the second. " +
+        "Sections are named areas that group tools (board_list → sections; @name works for them too): keep related tools in one, and a request about a section means the tools in it.",
     },
   );
 
@@ -73,6 +74,15 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
     return { id, name: t?.name, title: t?.title };
   };
   const linkSummary = (l: Link) => ({ id: l.id, reads: board.describeLink(l), direction: l.direction, from: named(l.from), to: named(l.to), createdBy: l.createdBy });
+  const sectionSummary = (sec: Section) => ({
+    id: sec.id,
+    name: sec.name,
+    title: sec.title,
+    color: sec.color,
+    layout: sec.layout,
+    tools: board.toolsIn(sec.id).map((t) => ({ id: t.id, name: t.name, title: t.title })),
+    createdBy: sec.createdBy,
+  });
 
   const reply = (data: unknown) => {
     const pending = board.undeliveredForAgent();
@@ -112,11 +122,12 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
 
   server.registerTool(
     "board_list",
-    { description: "List the tools on the board (id, name, title, kind, version, counts), the links between them, and any approvals still waiting for the person." },
+    { description: "List the tools on the board (id, name, title, kind, version, counts), the links between them, the sections that group them, and any approvals still waiting for the person." },
     async () =>
       run(() => ({
         tools: board.listTools().map(summarize),
         links: board.listLinks().map(linkSummary),
+        sections: board.listSections().map(sectionSummary),
         channels: board.listChannels().map(channelSummary),
         pendingAsks: board.pendingAsks().map((a) => ({ id: a.id, kind: a.kind, title: a.title, toolId: a.toolId, itemId: a.itemId })),
       })),
@@ -131,7 +142,8 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
     async ({ toolId }) =>
       run(() => {
         const t = board.getTool(toolId);
-        return { ...forAgent(t), links: board.linksOf(t.id).map(linkSummary) };
+        const sec = board.sectionOf(t.id);
+        return { ...forAgent(t), links: board.linksOf(t.id).map(linkSummary), section: sec ? { id: sec.id, name: sec.name, title: sec.title } : null };
       }),
   );
 
@@ -226,6 +238,64 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
     async ({ linkId }) =>
       run(() => {
         board.deleteLink("agent", linkId);
+        return { ok: true };
+      }),
+  );
+
+  // ── sections: named areas that group tools ────────────────────────────────
+  const sectionColor = z.enum(SECTION_COLORS);
+  server.registerTool(
+    "section_create",
+    {
+      description:
+        "Group tools in a section: a named area on the board around them (like a section in Figma), e.g. \"Research\" around a note and the browser that searches. " +
+        "Give the tools (ids or names) and it is drawn around them; tools placed inside it later belong to it too. Or give x, y, w, h for an empty one.",
+      inputSchema: {
+        title: z.string().describe('What it holds, e.g. "Research"'),
+        around: z.array(z.string()).optional().describe("Tools to put in it (ids or names)"),
+        name: z.string().optional().describe("For @name; default section1, section2…"),
+        color: sectionColor.optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        w: z.number().optional(),
+        h: z.number().optional(),
+      },
+    },
+    async ({ title, around, name, color, x, y, w, h }) =>
+      run(() => {
+        const layout = x !== undefined && y !== undefined ? { x, y, w, h } : undefined;
+        return sectionSummary(board.createSection("agent", { title, name, color: color as any, around: around?.map((r: string) => board.resolveToolId(r)), layout }));
+      }),
+  );
+  server.registerTool(
+    "section_update",
+    {
+      description: "Rename, recolour, move or resize a section (id or name). Moving it (x, y) takes the tools in it along; resizing (w, h) leaves them where they are.",
+      inputSchema: {
+        sectionId: z.string(),
+        title: z.string().optional(),
+        name: z.string().optional(),
+        color: sectionColor.optional(),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        w: z.number().optional(),
+        h: z.number().optional(),
+      },
+    },
+    async ({ sectionId, title, name, color, x, y, w, h }) =>
+      run(() => {
+        const sec = board.getSection(sectionId);
+        if (title !== undefined || name !== undefined || color !== undefined) board.updateSection("agent", sec.id, { title, name, color: color as any });
+        if ([x, y, w, h].some((v) => v !== undefined)) board.setSectionLayout(sec.id, { x, y, w, h }, true);
+        return sectionSummary(board.getSection(sec.id));
+      }),
+  );
+  server.registerTool(
+    "section_delete",
+    { description: "Remove a section. The tools in it stay on the board.", inputSchema: { sectionId: z.string() } },
+    async ({ sectionId }) =>
+      run(() => {
+        board.deleteSection("agent", sectionId);
         return { ok: true };
       }),
   );

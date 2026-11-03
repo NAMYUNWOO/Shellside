@@ -145,6 +145,33 @@ export interface Tool {
 /** A tool's name: letters (any script), digits, _ . - (no spaces, so "@name" reads as one word in a request). */
 export const TOOL_NAME = /^[\p{L}\p{N}][\p{L}\p{N}_.-]{0,39}$/u;
 
+// ── sections: named areas of the board that group tools (Figma's sections) ──
+export const SECTION_COLORS = ["gray", "red", "orange", "yellow", "green", "blue", "violet", "pink"] as const;
+export type SectionColor = (typeof SECTION_COLORS)[number];
+export interface SectionLayout {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export interface Section {
+  id: string;
+  /** For pointing at it ("@research"); unique among the board's tools and sections. */
+  name: string;
+  title: string;
+  color: SectionColor;
+  layout: SectionLayout;
+  createdBy: Actor;
+  createdAt: string;
+  updatedAt: string;
+}
+export const SECTION_MIN = { w: 160, h: 120 };
+/** Where a frame counts as being: the middle of its top part (its height can change with its content). */
+export const frameAnchor = (l: { x: number; y: number; w: number }) => ({ x: l.x + l.w / 2, y: l.y + 40 });
+export const inSection = (p: { x: number; y: number }, s: SectionLayout) => p.x >= s.x && p.x <= s.x + s.w && p.y >= s.y && p.y <= s.y + s.h;
+/** One section lies wholly inside another (and moves with it). */
+export const sectionInside = (a: SectionLayout, b: SectionLayout) => a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h;
+
 /**
  * A line the person (or the agent) drew between two tools. none: they belong together. forward: from → to (e.g. read
  * from, act on to). both: each way.
@@ -240,6 +267,7 @@ export type BoardEventType =
   | "channel_deleted"
   | "browser" // the agent drove a board browser, the person took it over or handed it back, a download finished
   | "link" // two tools were linked, a link's direction changed, or a link was removed
+  | "section" // a section was made, renamed, recoloured or removed
   | "prompt"; // the person sent a request to the agent in the terminal (it already has it)
 
 export interface BoardEvent {
@@ -250,6 +278,7 @@ export interface BoardEvent {
   toolId?: string;
   askId?: string;
   linkId?: string;
+  sectionId?: string;
   /** English: what the agent reads (board_wait_event) and the default UI text. */
   summary: string;
   /** Korean, for the board UI in Korean. */

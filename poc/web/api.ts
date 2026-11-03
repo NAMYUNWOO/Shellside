@@ -2,7 +2,7 @@
 // Board-scoped calls are bound to one board (makeApi / useApi), so boards running in the background never
 // send to the board on screen.
 import { createContext, createElement, useContext, useMemo, type ReactNode } from "react";
-import type { Ask, Channel, Link, LinkDirection, Tool } from "../shared/catalog.ts";
+import type { Ask, Channel, Link, LinkDirection, Section, SectionColor, SectionLayout, Tool } from "../shared/catalog.ts";
 import { currentLang } from "./i18n.tsx";
 
 export class ApiError extends Error {
@@ -106,7 +106,7 @@ export function makeApi(boardId: string) {
     // the board's agent
     startLogin: () => call<{ mode: "claude" | "started" }>("POST", b("/agent/login")),
     /** Type a request into this board's Claude (or start Claude with it), with the chosen tools as context. */
-    sendToAgent: (prompt: string, toolIds: string[]) => call<{ mode: "claude" | "started" }>("POST", b("/agent/send"), { prompt, toolIds }),
+    sendToAgent: (prompt: string, toolIds: string[], sectionIds: string[] = []) => call<{ mode: "claude" | "started" }>("POST", b("/agent/send"), { prompt, toolIds, sectionIds }),
     // tools
     createTool: (input: Partial<Tool> & { width?: number; at?: { x: number; y: number } }) => call<Tool>("POST", b("/tools"), input),
     /** asAgent: the write came from an app action the agent invoked, so it is the agent's change. */
@@ -116,6 +116,11 @@ export function makeApi(boardId: string) {
     deleteTool: (toolId: string) => call<{ ok: true }>("DELETE", b(`/tools/${toolId}`)),
     // links between tools
     createLink: (from: string, to: string, direction: LinkDirection = "none") => call<Link>("POST", b("/links"), { from, to, direction }),
+    createSection: (input: { id?: string; title?: string; name?: string; color?: SectionColor; around?: string[]; layout?: Partial<SectionLayout> }) => call<Section>("POST", b("/sections"), input),
+    updateSection: (id: string, input: { title?: string; name?: string; color?: SectionColor }) => call<Section>("PATCH", b(`/sections/${id}`), input),
+    setSectionLayout: (id: string, layout: Partial<SectionLayout>, moveContents = false) =>
+      call<{ section: Section; moved: string[] }>("PATCH", b(`/sections/${id}/layout`), { ...layout, moveContents }),
+    deleteSection: (id: string, withContents = false) => call<{ ok: true }>("DELETE", b(`/sections/${id}${withContents ? "?contents=1" : ""}`)),
     updateLink: (linkId: string, input: { direction?: LinkDirection; from?: string; to?: string }) => call<Link>("PATCH", b(`/links/${linkId}`), input),
     deleteLink: (linkId: string) => call<{ ok: true }>("DELETE", b(`/links/${linkId}`)),
     answerAsk: (askId: string, answer: { approved?: boolean; values?: Record<string, unknown>; comment?: string }) => call<Ask>("POST", b(`/asks/${askId}/answer`), answer),

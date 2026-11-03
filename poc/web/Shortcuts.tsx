@@ -14,6 +14,17 @@ const groups = (t: T): { title: string; rows: [string, string[]][] }[] => [
       [t("New note at the pointer", "포인터 위치에 메모"), ["N"]],
       [t("New checklist at the pointer", "포인터 위치에 체크리스트"), ["C"]],
       [t("New browser", "새 브라우저"), ["B"]],
+      [t("Section: draw one, or put the selection in one", "섹션: 그리기, 또는 선택한 것을 섹션으로"), [kbd("shift+s")]],
+    ],
+  },
+  {
+    title: t("Sections", "섹션"),
+    rows: [
+      [t("Put the selection in a new section", "선택한 것을 새 섹션으로 묶기"), [kbd("shift+s"), kbd("mod+alt+s")]],
+      [t("Move a section and what is in it", "섹션과 안의 것을 함께 옮기기"), [t("Drag its name", "이름을 드래그")]],
+      [t("Remove the section, keep what is in it", "섹션만 없애기 (안의 것은 남김)"), [kbd("mod+shift+g")]],
+      [t("Delete the section and what is in it", "섹션과 안의 것 삭제"), [kbd("delete")]],
+      [t("Send a section to Claude", "섹션을 Claude에게 보내기"), [kbd("mod+enter"), "@" + t("name", "이름")]],
     ],
   },
   {

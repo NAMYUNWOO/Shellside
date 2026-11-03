@@ -1,7 +1,7 @@
 // Modal dialogs: send a request to Claude about selected tools, and save a tool to the library.
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { Tool } from "../shared/catalog.ts";
+import type { Section, Tool } from "../shared/catalog.ts";
 import { useApi, ApiError, type AgentStatus } from "./api.ts";
 import { kindLabel, useT, type T } from "./i18n.tsx";
 import { ShellsideMark } from "./ShellsideMark.tsx";
@@ -33,6 +33,7 @@ const suggestions = (t: T) => [t("Fix this tool: ", "이 도구를 고쳐줘: ")
 
 export function SendToClaudeDialog({
   tools,
+  sections = [],
   status,
   onClose,
   onNotice,
@@ -40,6 +41,8 @@ export function SendToClaudeDialog({
   onOpenTerminal,
 }: {
   tools: Tool[];
+  /** Sections the request is about (their tools come along). */
+  sections?: Section[];
   status: AgentStatus | null;
   onClose: () => void;
   onNotice: (m: string) => void;
@@ -64,6 +67,7 @@ export function SendToClaudeDialog({
       const r = await api.sendToAgent(
         prompt,
         tools.map((tool) => tool.id),
+        sections.map((sec) => sec.id),
       );
       onNotice(r.mode === "claude" ? t("Sent to Claude.", "Claude에게 보냈습니다.") : t("Started Claude in the terminal with your request.", "터미널에서 Claude를 시작해 요청을 보냈습니다."));
       onSent(r.mode);
@@ -84,8 +88,13 @@ export function SendToClaudeDialog({
         </>
       }
     >
-      {tools.length > 0 && (
+      {tools.length + sections.length > 0 && (
         <div className="chips" aria-label={t("Target tools", "대상 도구")}>
+          {sections.map((sec) => (
+            <span key={sec.id} className="chip">
+              <b>{sec.title}</b> <span className="muted">{t("section", "섹션")}</span>
+            </span>
+          ))}
           {tools.map((tool) => (
             <span key={tool.id} className="chip">
               <b>{tool.title}</b> <span className="muted">{kindLabel(tool.kind, t)}</span>
