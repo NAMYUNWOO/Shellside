@@ -12,9 +12,69 @@ npm install
 npm run dev
 ```
 
-Requires Node.js 22 or newer.
+Requires Node.js 22 or newer. Works on macOS, Linux and Windows (PowerShell; see [Windows](#windows)).
 
-Open <http://127.0.0.1:5173>. The server listens only on `127.0.0.1:4100`.
+Open <http://127.0.0.1:5173>. The server listens only on `127.0.0.1:4100`. Without Vite: `npm run build`, then
+`npm start`, and open <http://127.0.0.1:4100>. Or use the [desktop app](#desktop-app).
+
+## Windows
+
+The server, Vite, Chrome and Claude Code all run as Windows programs; WSL is not needed (it still works, see
+[Board browser](#board-browser)).
+
+- **Install:** Node.js 22+ for Windows, [Claude Code](https://code.claude.com/docs/en/setup) (the native installer gives
+  `claude.exe`; an npm install's `claude.cmd` works too), and Chrome or Edge. Git for Windows is optional: Claude Code
+  uses Git Bash for its shell tool when it is there, PowerShell otherwise. `npm install` needs no compiler (node-pty
+  ships Windows binaries).
+- **Board terminal:** Windows PowerShell 5.1; set `WB_SHELL=pwsh.exe` for PowerShell 7. It loads your profile, then the
+  board's setup, passed as command text (`-EncodedCommand`): an execution policy that blocks scripts can block your
+  profile but not that. The setup sets UTF-8, puts `wb` on `Path`, wraps `claude` with the board's MCP config,
+  settings and rules (the rules go in by file, `--append-system-prompt-file`), and records what runs in the
+  foreground, which node-pty can't tell on Windows: the first word of each line you enter, `claude` while the wrapper
+  runs it, and `powershell` at each prompt. So the board reports what you typed: a program started from a script, or
+  `& claude.exe …` typed by hand, shows under the name you typed.
+- **Sending to Claude:** PowerShell 5.1 mangles double quotes inside arguments to programs, so a request that starts
+  Claude starts it bare and pastes the request once Claude Code's `SessionStart` hook says it is ready.
+- **`wb`:** `bin/wb.cmd` (PowerShell and cmd) and `bin/wb` (Git Bash). In PowerShell 5.1, JSON arguments lose their
+  double quotes on the way to `wb` (the same quoting bug), so pass JSON from a file or stdin (`-`) there.
+- Organization-managed PCs: Chrome policies apply to the board browser's profile, including extensions they install.
+  If the organization sets `allowedHttpHookUrls` or only allows managed hooks, the board can't see Claude's state.
+
+## Desktop app
+
+`poc/desktop/` wraps the server and the board UI into an app (Electron) for macOS and Windows. Opening it starts the
+server and shows the board in the app's window; quitting stops the server, its terminals and Claude in them (the app
+asks first when Claude is running). Download it from
+[Releases](https://github.com/NAMYUNWOO/Shellside/releases/latest).
+
+- **Where things are:** board folders in `~/Shellside/<boardId>` (`%USERPROFILE%\Shellside` on Windows); boards,
+  sign-ins of the board browser and paired browsers in the app's data folder
+  (`~/Library/Application Support/Shellside/data`, `%APPDATA%\Shellside\data`); the server log in
+  `~/Library/Logs/Shellside/server.log` (`%APPDATA%\Shellside\logs`). **File** → **Show Board Folders** / **Show Logs**
+  opens them. The app keeps its own boards: it doesn't share `poc/data` with `npm run dev`.
+- **Port:** the first free one from 4110 (4100 stays free for `npm run dev`). **File** → **Open in Browser** opens the
+  board in your browser; that browser asks to pair, and the app shows the code in a dialog.
+- **Environment:** opened from the Dock or Finder, a macOS app gets none of your shell profile's settings, so the app
+  asks your login shell for its environment (PATH, proxies, tokens), as VS Code does. If the profile takes longer than
+  6 s, it uses `~/.local/bin`, `/opt/homebrew/bin` and `/usr/local/bin` instead. macOS may ask whether Shellside may
+  access a folder your profile or Claude reads, as it does for any terminal app.
+- **The `wb` CLI** in its terminals runs on the app's own runtime (`WB_NODE`); no separate Node.js is needed.
+- **Not code-signed yet:** macOS builds carry only an ad-hoc signature and are not notarized, and Windows builds are
+  unsigned, so the first open shows a warning (see the [Quick start](../README.md#desktop-app-macos-windows)). On macOS
+  you can instead clear the download flag: `xattr -dr com.apple.quarantine /Applications/Shellside.app`.
+- **Build it:** on the system you build for,
+
+  ```bash
+  cd poc && npm install
+  cd desktop && npm install
+  npm run dist      # release/: .dmg and .zip (macOS, arm64 and x64), installer and .zip (Windows)
+  npm start         # or run it without packaging
+  ```
+
+  `build.mjs` stages the UI, the app sandbox runtime, the server bundled into one file (with its third-party notices,
+  `server/third-party-licenses.md`), the `wb` CLI and node-pty's prebuilt binaries; electron-builder
+  (`electron-builder.yml`) packages them. CI (`.github/workflows/desktop.yml`) builds both on every push, runs each
+  build once (`SHELLSIDE_SMOKE`), and a `v*` tag puts the builds on a draft release.
 
 ## Screen
 
@@ -50,12 +110,12 @@ Right-click a board in the list → **Open in new window** to see two boards sid
 
 ## Sending to Claude (safety rules)
 
-The board tracks each board's Claude state through Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse`, `Stop`, `StopFailure`, `SessionEnd`).
+The board tracks each board's Claude state through Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse`, `Stop`, `StopFailure`, `SessionEnd`). They are HTTP hooks (Claude Code 2.1.63 or later): Claude Code posts each event to the board's server itself, so nothing runs in a shell per hook.
 When you send:
 
 | Claude state | What happens |
 | --- | --- |
-| Off (shell only) | Starts Claude with `claude $'<request>'` and opens the terminal window (a folder trust prompt may appear) |
+| Off (shell only) | Starts Claude with `claude $'<request>'` and opens the terminal window (a folder trust prompt may appear). PowerShell: starts `claude`, then pastes the request once Claude is ready |
 | Idle / working | Pastes into Claude's input and presses Enter. If Claude is working, it queues the request |
 | Waiting on a permission prompt or dialog / starting | **Does not send.** Enter could be taken as approving a permission. Says why and opens the terminal |
 
@@ -219,6 +279,10 @@ web/Canvas.tsx       React Flow canvas (frames, selection box, right-click, drop
 web/BoardPanel.tsx   Board view: header, menus, dialogs, library, input box
 web/BrowserView.tsx  A browser frame: live page, address bar, tabs, take over, dropdown/dialog/file overlays
 web/TerminalPane.tsx The only file that knows about wterm (the point to swap or fork it)
+bin/wb, wb.cmd, wb.mjs  The wb CLI (sh and cmd wrappers around wb.mjs)
+test/terminal-check.mjs End-to-end check of a board terminal on this OS, with a fake claude (CI runs it on all three)
+desktop/main.mjs     Desktop app: starts the server in a utility process, the window, menus, pairing codes
+desktop/build.mjs    Stages the desktop app for electron-builder (electron-builder.yml)
 ```
 
 ## Data
@@ -244,7 +308,10 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 
 - **Full list:** `npm run build` writes `dist/third-party-licenses.md`. It lists every package bundled into the board UI with its license text, including the ones that come in through React Flow: d3 modules (ISC; d3-ease BSD-3-Clause) and zustand (MIT). The server serves it at `/third-party-licenses.md`, and the boards panel links to it ("Open source licenses"). The app sandbox runtime keeps React's own license headers.
 - **Not bundled:** the board browser drives the Chrome installed on the machine. Its design follows [ego-lite](https://github.com/citrolabs/ego-lite) (MIT), but no code was copied from it.
-- **Build tools only** (TypeScript, Vite and its lightningcss under MPL-2.0, tsx, concurrently): not shipped.
+- **Desktop app:** Electron (MIT) with Chromium; the app ships Electron's `LICENSE` and `LICENSES.chromium.html`, the
+  board UI's list above, and `server/third-party-licenses.md` for the packages bundled into its server (the MCP SDK and
+  what it brings: ajv, hono, zod-to-json-schema…, plus ws, zod, sucrase, fast-json-patch).
+- **Build tools only** (TypeScript, Vite and its lightningcss under MPL-2.0, tsx, concurrently, electron-builder): not shipped.
 - **This project:** [MIT](../LICENSE).
 
 ## wterm modification candidates
@@ -258,7 +325,7 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 ## Security notes
 
 - The server binds only to `127.0.0.1` and checks the `Host` and `Origin` headers, and refuses requests the browser marks as cross-site (`Sec-Fetch-Site`), so other websites and DNS rebinding can't reach it.
-- Only a browser paired with the server counts as the person. The first browser that opens a server nobody has paired with is paired automatically (no agent can run before that: Claude starts from a board's terminal, and only a paired browser can open one). Any other browser types a one-time 8-digit code that the server prints in its own console (valid 10 minutes, five tries). Paired browsers keep an `HttpOnly`, `SameSite=Strict` cookie; the server keeps only its SHA-256 in `data/browser-sessions.json`. Every other request is the agent at most: it must say so (`x-wb-actor: agent`, as the `wb` CLI does) or it's refused, so Claude can't approve its own asks, connect to a terminal socket to answer its own permission prompts, or send messages as you. To unpair every browser, empty that file's `sessions` list and restart the server. Anyone who can read the server's console output can pair a browser, so run the server in your own terminal rather than writing its output to a file.
+- Only a browser paired with the server counts as the person. The first browser that opens a server nobody has paired with is paired automatically (no agent can run before that: Claude starts from a board's terminal, and only a paired browser can open one). Any other browser types a one-time 8-digit code that the server prints in its own console (valid 10 minutes, five tries). Paired browsers keep an `HttpOnly`, `SameSite=Strict` cookie; the server keeps only its SHA-256 in `data/browser-sessions.json`. Every other request is the agent at most: it must say so (`x-wb-actor: agent`, as the `wb` CLI does) or it's refused, so Claude can't approve its own asks, connect to a terminal socket to answer its own permission prompts, or send messages as you. To unpair every browser, empty that file's `sessions` list and restart the server. Anyone who can read the server's console output can pair a browser, so run the server in your own terminal rather than writing its output to a file. The desktop app pairs its own window directly (the server gives it a session over Electron's private channel to the app) and shows codes for other browsers in a dialog, not in its log.
 - Each board's terminal is a real shell with your user's permissions, and Claude runs in it. There is no container isolation yet. Don't expose the port (no port forwarding, no tunnels), and only run agents you trust.
 - App code runs in a sandboxed iframe (opaque origin, a CSP that allows no network access) and talks to the board only through `postMessage`.
 - When app code writes to other tools, those writes count as the agent's writes, so read-only settings and human approval gates still apply.
