@@ -1,6 +1,6 @@
 {
   "name": "shellside-desktop",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "private": true,
   "license": "MIT",
   "description": "Shellside: Claude Code in a terminal beside a tool board it builds",

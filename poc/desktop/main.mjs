@@ -383,6 +383,9 @@ async function smoke(file) {
         out.bridge = typeof window.shellside?.pathForFile === "function";
         const dropped = await fetch("/api/b/main/file-tools/from-path", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: ${JSON.stringify(SMOKE_FILE)} }) });
         out.file = dropped.ok ? (await dropped.json()).props : { error: (await dropped.json()).error };
+        out.pickPath = typeof window.shellside?.pickPath === "function";
+        const monaco = await fetch("/sandbox/monaco.js");
+        out.appEditor = monaco.ok ? (await monaco.arrayBuffer()).byteLength : monaco.status;
         out.claude = await (await fetch("/api/agent/auth")).json();
         const ws = new WebSocket("ws://" + location.host + "/ws/pty?board=main");
         ws.binaryType = "arraybuffer";
@@ -406,7 +409,7 @@ async function smoke(file) {
         return out;
       })()`),
     );
-    result.ok = result.health?.ok === true && !!result.shell && result.echo && result.wb && result.bridge && /^\/|^[A-Za-z]:/.test(result.file?.path ?? "");
+    result.ok = result.health?.ok === true && !!result.shell && result.echo && result.wb && result.bridge && result.pickPath && result.appEditor > 1e6 && /^\/|^[A-Za-z]:/.test(result.file?.path ?? "");
     // With SHELLSIDE_UPDATE_URL (a test server), also: the update check reads the latest version.
     if (process.env.SHELLSIDE_UPDATE_URL) result.update = await latestRelease().catch((err) => ({ error: String(err?.message ?? err) }));
   } catch (err) {
