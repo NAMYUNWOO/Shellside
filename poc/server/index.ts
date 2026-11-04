@@ -1,6 +1,6 @@
 // WorkBoard PoC server: boards (each with its own terminal + Claude session), Board MCP per board, on one localhost port.
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -14,6 +14,7 @@ import { BrowserService } from "./browser.ts";
 import { findChrome, noChromeMessage } from "./cdp.ts";
 import { startupNotes } from "./certs.ts";
 import { HumanSessions, sessionCookie } from "./auth.ts";
+import { contentHeaders, copyIntoWorkspace, describeFile, receiveFile } from "./files.ts";
 import { CATALOG_DOC, type Actor } from "../shared/catalog.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -306,7 +307,27 @@ const boardRoutes: BoardRoute[] = [
     },
   ],
   ["GET", /^\/tools\/([\w-]+)$/, ({ rt, params }) => rt.board.getTool(params[0])],
-  ["POST", /^\/tools$/, ({ rt, body, actor }) => rt.board.createTool(actor, body ?? {})],
+  [
+    "POST",
+    /^\/tools$/,
+    async ({ rt, body, actor }) => {
+      if (body?.kind !== "file") return rt.board.createTool(actor, body ?? {});
+      // A file tool again (undo of a delete): the person's only, and its details come from the file itself.
+      humanOnly(actor, "file tools");
+      const props = await describeFile(rt.meta.workspace, String(body?.props?.path ?? ""));
+      return rt.board.createTool(actor, { ...body, props, title: body.title || props.fileName }, { fileOk: true });
+    },
+  ],
+  // The desktop app's drop: copy the file from where it is on this machine (the window knows its path).
+  [
+    "POST",
+    /^\/file-tools\/from-path$/,
+    async ({ rt, body, actor }) => {
+      humanOnly(actor, "dropping files");
+      const dest = await copyIntoWorkspace(rt.meta.workspace, String(body?.path ?? ""));
+      return fileTool(rt, actor, dest, body?.at);
+    },
+  ],
   ["PATCH", /^\/tools\/([\w-]+)$/, ({ rt, params, body, actor }) => rt.board.updateTool(actor, params[0], body ?? {})],
   ["PATCH", /^\/tools\/([\w-]+)\/layout$/, ({ rt, params, body }) => rt.board.setLayout(params[0], body ?? {})],
   ["POST", /^\/tools\/([\w-]+)\/patch$/, ({ rt, params, body, actor }) => rt.board.patchState(actor, params[0], body?.patch, body?.baseVersion)],
@@ -555,6 +576,31 @@ async function saveUpload(rt: BoardRuntime, req: IncomingMessage, url: URL, acto
   return meta;
 }
 
+// ── file tools ────────────────────────────────────────────────────────────────
+/** A file tool for a file now in the board's workspace. at: where the person dropped it (its top-left). */
+async function fileTool(rt: BoardRuntime, actor: Actor, path: string, at?: { x: number; y: number }) {
+  const props = await describeFile(rt.meta.workspace, path);
+  const w = 340;
+  const where = at && Number.isFinite(at.x) && Number.isFinite(at.y) ? { at: { x: at.x + w / 2, y: at.y + 80 } } : {};
+  return rt.board.createTool(actor, { kind: "file", title: props.fileName, props, state: { note: "" }, width: w, ...where }, { fileOk: true });
+}
+
+/** The file behind a file tool, for the person's browser: previews and "Open". head=N: just its first N bytes, as text. */
+async function serveFile(rt: BoardRuntime, toolId: string, url: URL, res: ServerResponse, actor: Actor) {
+  humanOnly(actor, "files");
+  const t = rt.board.getTool(toolId);
+  if (t.kind !== "file") throw new BoardError("not a file tool", 400);
+  const { path, fileName, mime } = t.props as { path: string; fileName: string; mime: string };
+  if (!existsSync(path)) throw new BoardError(`the file is gone from ${path}`, 404);
+  const head = Number(url.searchParams.get("head"));
+  if (Number.isFinite(head) && head > 0) {
+    res.writeHead(200, { ...contentHeaders(fileName, "text/plain"), "content-disposition": "inline" });
+    return createReadStream(path, { start: 0, end: Math.min(head, 64 * 1024) - 1 }).pipe(res);
+  }
+  res.writeHead(200, { ...contentHeaders(fileName, mime), "content-length": statSync(path).size });
+  createReadStream(path).pipe(res);
+}
+
 // ── open source notices (written by `vite build`, see build.license in vite.config.ts) ──
 const LICENSES = "third-party-licenses.md";
 function serveLicenses(res: ServerResponse) {
@@ -620,6 +666,18 @@ const server = createServer(async (req, res) => {
       const rt = boards.get(scoped[1]);
       const sub = scoped[2];
       if (sub === "/files" && req.method === "POST") return send(res, 200, await saveUpload(rt, req, url, actor!));
+      // A file dropped in a browser: streamed to disk, any size.
+      if (sub === "/file-tools" && req.method === "POST") {
+        humanOnly(actor!, "dropping files");
+        // octet-stream is not a CORS-simple type, so other sites cannot post here without a preflight we never grant.
+        if (!(req.headers["content-type"] ?? "").startsWith("application/octet-stream")) throw new BoardError("content-type must be application/octet-stream", 415);
+        const dest = await receiveFile(req, rt.meta.workspace, url.searchParams.get("name") ?? "file");
+        const x = Number(url.searchParams.get("x"));
+        const y = Number(url.searchParams.get("y"));
+        return send(res, 200, await fileTool(rt, actor!, dest, Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined));
+      }
+      const fileContent = /^\/file-tools\/([\w-]+)\/content$/.exec(sub);
+      if (fileContent && req.method === "GET") return serveFile(rt, fileContent[1], url, res, actor!);
       const hit = await dispatch(boardRoutes, sub, req, res, (params, body) => ({ req, res, params, url, body, actor: actor!, lang: langOf(req), rt }));
       if (!hit) send(res, 404, { error: `no route for ${req.method} ${url.pathname}` });
       return;
@@ -774,6 +832,9 @@ if (parent) {
     else if (data?.type === "quit") shutdown();
   });
 }
+
+// A big file dropped in a browser can take longer than Node's default 5 minutes per request (this is local only).
+server.requestTimeout = 0;
 
 server.on("error", (err: NodeJS.ErrnoException) => {
   const message = err.code === "EADDRINUSE" ? `port ${PORT} is in use (another Shellside server?). Set WB_PORT to use another.` : err.message;

@@ -1,12 +1,14 @@
 // Board MCP server: how the agent in the terminal sees and changes the board.
 // Stateless Streamable HTTP: a fresh server per request, all state lives in Board.
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isAbsolute, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { CATALOG_DOC, LINK_DIRECTIONS, SECTION_COLORS, TOOL_KINDS, describeValue, formField, type Link, type Section, type Tool } from "../shared/catalog.ts";
 import { Board, BoardError } from "./board.ts";
 import { loadSource } from "./apps.ts";
+import { copyIntoWorkspace, describeFile } from "./files.ts";
 import type { Library } from "./library.ts";
 import type { BoardBrowsers } from "./browser.ts";
 
@@ -45,7 +47,9 @@ function summarize(t: Tool) {
             ? { stateKeys: Object.keys(s ?? {}).slice(0, 20), sourcePath: t.props.sourcePath }
             : t.kind === "browser"
               ? { url: s.url, pageTitle: s.title, control: s.control, tabs: s.tabs?.length ?? 0 }
-              : { chars: s.text?.length ?? 0 };
+              : t.kind === "file"
+                ? { fileName: t.props.fileName, path: t.props.path, size: t.props.size, mime: t.props.mime }
+                : { chars: s.text?.length ?? 0 };
   return { id: t.id, name: t.name, title: t.title, kind: t.kind, description: t.description, version: t.version, agentAccess: t.agentAccess, updatedBy: t.updatedBy, ...counts };
 }
 
@@ -239,6 +243,29 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
       run(() => {
         board.deleteLink("agent", linkId);
         return { ok: true };
+      }),
+  );
+
+  // ── files ──────────────────────────────────────────────────────────────────
+  server.registerTool(
+    "file_add",
+    {
+      description:
+        "Put a file on the board as a file tool, e.g. a report or chart you made, so the person sees it and can open it. " +
+        "A file in the board's workspace stays where it is; one elsewhere is copied into the workspace's files/ folder. " +
+        "Files the person drops on the board are file tools already: read them at props.path.",
+      inputSchema: {
+        path: z.string().describe("Absolute, or relative to the board's workspace"),
+        title: z.string().optional().describe("Default: the file's name"),
+        note: z.string().optional().describe("A line about it, shown under the file"),
+      },
+    },
+    async ({ path, title, note }) =>
+      run(async () => {
+        const abs = isAbsolute(path) ? path : join(ctx.workspace, path);
+        const here = await describeFile(ctx.workspace, abs);
+        const props = here.relPath ? here : await describeFile(ctx.workspace, await copyIntoWorkspace(ctx.workspace, abs));
+        return summarize(board.createTool("agent", { kind: "file", title: title || props.fileName, props, state: { note: note ?? "" } }, { fileOk: true }));
       }),
   );
 

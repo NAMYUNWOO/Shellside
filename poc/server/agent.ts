@@ -142,7 +142,7 @@ export function requestTools(board: Board, prompt: string, toolIds: string[], se
  *  the request is about, with the tools in them. */
 export function composeRequest(prompt: string, tools: Tool[], links: string[] = [], sections: string[] = []): string {
   if (!tools.length && !sections.length) return prompt.trim();
-  const refs = tools.map((t) => `- @${t.name ?? t.id} "${t.title}" (${t.kind}, id: ${t.id})`).join("\n");
+  const refs = tools.map((t) => `- @${t.name ?? t.id} "${t.title}" (${t.kind}, id: ${t.id}${t.kind === "file" ? `, path: ${t.props.path}` : ""})`).join("\n");
   const linked = links.length ? `\nLinks:\n${links.map((l) => `- ${l}`).join("\n")}\n` : "";
   const grouped = sections.length ? `\nSections:\n${sections.map((x) => `- ${x}`).join("\n")}\n` : "";
   return `[WorkBoard] A request about tools on the board (selected, or named with @). Read them with the workboard MCP (tool_read, app_snapshot, browser_snapshot).\nTools:\n${refs || "- (none)"}\n${linked}${grouped}\nRequest: ${prompt.trim()}`;

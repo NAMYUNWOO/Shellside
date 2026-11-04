@@ -119,6 +119,8 @@ interface BoardCanvasProps {
   selectedSectionIds: string[];
   onSelectSections: (ids: string[], additive: boolean) => void;
   onSectionMenu: (e: { x: number; y: number }, sectionId: string) => void;
+  /** Files dropped from the computer (board coordinates of the drop). */
+  onDropFiles: (files: File[], at: { x: number; y: number }) => void;
   /** Drawn with the section tool (board coordinates). */
   onDrawSection: (layout: SectionLayout) => void;
   /** A section was dragged (its contents went along) or resized: save it and keep it for undo. */
@@ -433,15 +435,24 @@ export function BoardCanvas(props: BoardCanvasProps) {
         props.onContextMenu({ x: e.clientX, y: e.clientY }, [], flowPos(e));
       }}
       onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes(TEMPLATE_MIME)) return;
+        if (!e.dataTransfer.types.includes(TEMPLATE_MIME) && !e.dataTransfer.types.includes("Files")) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";
       }}
       onDrop={(e) => {
         const id = e.dataTransfer.getData(TEMPLATE_MIME);
-        if (!id) return;
+        if (id) {
+          e.preventDefault();
+          return props.onDropTemplate(id, flowPos(e));
+        }
+        // Files from the computer become file tools where they land. Folders are left out (their entry says so).
+        const items = [...e.dataTransfer.items].filter((it) => it.kind === "file");
+        if (!items.length) return;
         e.preventDefault();
-        props.onDropTemplate(id, flowPos(e));
+        const folders = items.filter((it) => it.webkitGetAsEntry?.()?.isDirectory).length;
+        const files = items.filter((it) => !it.webkitGetAsEntry?.()?.isDirectory).map((it) => it.getAsFile()).filter((f): f is File => !!f);
+        if (folders) onNotice(t("Folders can't go on the board yet: drop the files in them.", "폴더는 아직 올릴 수 없습니다. 폴더 안의 파일을 끌어다 놓으세요."));
+        if (files.length) props.onDropFiles(files, flowPos(e));
       }}
       onMoveStart={(e) => e && onInteract()}
       onMoveEnd={(_e, vp) => {

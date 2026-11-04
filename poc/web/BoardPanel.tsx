@@ -98,6 +98,8 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   const [sendSectionIds, setSendSectionIds] = useState<string[]>([]);
   const [selectedSectionIds, setSelectedSectionIds] = useState<string[]>([]);
   const [sectionMenu, setSectionMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  /** Files on their way onto the board (a big one streams for a while). */
+  const [uploads, setUploads] = useState<{ key: string; name: string; size: number; loaded: number; state: "sending" | "done" | "failed"; error?: string }[]>([]);
   /** Shift (or ⌘/Ctrl) held: a click adds to the selection instead of replacing it. */
   const adding = useRef(false);
   const [saveTool, setSaveTool] = useState<Tool | null>(null);
@@ -396,6 +398,30 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       onNotice((err as Error).message);
     }
   };
+  /** Files dropped on the board: one file tool each, in a grid from the drop point, one at a time. */
+  const dropFiles = async (files: File[], at: { x: number; y: number }) => {
+    const batch = files.map((f, i) => ({ file: f, key: `${Date.now()}-${i}-${f.name}`, at: { x: at.x + (i % 4) * 380, y: at.y + Math.floor(i / 4) * 280 } }));
+    setUploads((u) => [...u, ...batch.map((b) => ({ key: b.key, name: b.file.name, size: b.file.size, loaded: 0, state: "sending" as const }))]);
+    const set = (key: string, patch: Partial<(typeof uploads)[number]>) => setUploads((u) => u.map((x) => (x.key === key ? { ...x, ...patch } : x)));
+    const made: string[] = [];
+    for (const b of batch) {
+      try {
+        const tool = await api.dropFile(b.file, b.at, (loaded) => set(b.key, { loaded }));
+        made.push(tool.id);
+        set(b.key, { state: "done", loaded: b.file.size });
+      } catch (err) {
+        set(b.key, { state: "failed", error: (err as Error).message });
+        onNotice(`${b.file.name}: ${(err as Error).message}`);
+      }
+    }
+    if (made.length) {
+      setSelectedIds(made);
+      setSelectedSectionIds([]);
+      recordCreate(made, t("Add files", "파일 추가"));
+    }
+    window.setTimeout(() => setUploads((u) => u.filter((x) => !batch.some((b) => b.key === x.key) || x.state === "sending")), 2500);
+  };
+
   const sendSections = (ids: string[]) => {
     setSendSectionIds(ids);
     setSendIds([]);
@@ -694,7 +720,8 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
                 window.setTimeout(() => (document.getElementById("insp-title") as HTMLInputElement | null)?.select(), 50);
               },
             },
-            { label: t("Save to library…", "라이브러리에 저장…"), onSelect: () => setSaveTool(one) },
+            // A saved component is remade without its file, so files stay out of the library.
+            ...(one.kind === "file" ? [] : [{ label: t("Save to library…", "라이브러리에 저장…"), onSelect: () => setSaveTool(one) }]),
             ...(one.name
               ? [{ label: t("Copy name", "이름 복사"), hint: `@${one.name}`, onSelect: () => navigator.clipboard?.writeText(`@${one.name}`).then(() => onNotice(t(`Copied @${one.name}`, `@${one.name} 복사됨`))) }]
               : []),
@@ -768,6 +795,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
             onSelectSections={onSelectSections}
             onSectionMenu={(pos, id) => setSectionMenu({ ...pos, id })}
             onDrawSection={drawSection}
+            onDropFiles={dropFiles}
             onSectionMoved={onSectionMoved}
             onSectionRename={onSectionRename}
             showMinimap={minimap}
@@ -788,6 +816,19 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
             onInteract={onInteract}
             onNotice={onNotice}
           >
+            {uploads.length > 0 && (
+              <Panel position="bottom-left" className="uploads" aria-live="polite">
+                {uploads.map((u) => (
+                  <div key={u.key} className={`upload ${u.state}`} title={u.error}>
+                    <span className="upload-name">{u.name}</span>
+                    <span className="upload-size">
+                      {u.state === "failed" ? t("failed", "실패") : u.state === "done" ? "✓" : u.size ? `${Math.floor((u.loaded / u.size) * 100)}%` : "…"}
+                    </span>
+                    <span className="upload-bar" style={{ ["--p" as string]: u.size ? u.loaded / u.size : 0 }} />
+                  </div>
+                ))}
+              </Panel>
+            )}
             {libraryOpen && (
               <Panel position="top-left">
                 <LibraryPanel items={library} onAdd={(id) => addTemplate(id)} onClose={() => setLibraryOpen(false)} onNotice={onNotice} />

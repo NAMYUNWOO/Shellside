@@ -315,9 +315,11 @@ function ToolInspector({ tool, now, errors, onNotice, onSendToClaude, onSave, on
         <button className="primary wide" onClick={() => onSendToClaude([tool.id])}>
           {t("Send to Claude…", "Claude에게 보내기…")}
         </button>
-        <button className="wide" onClick={() => onSave(tool)}>
-          {t("Save to library…", "라이브러리에 저장…")}
-        </button>
+        {tool.kind !== "file" && (
+          <button className="wide" onClick={() => onSave(tool)}>
+            {t("Save to library…", "라이브러리에 저장…")}
+          </button>
+        )}
       </section>
 
       {tool.kind === "app" && (

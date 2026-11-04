@@ -2,7 +2,8 @@
 // The canvas frame (Canvas.tsx) and the inspector (Inspector.tsx) wrap these.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChecklistItem, FormField, TableColumn, Tool } from "../shared/catalog.ts";
-import { useApi } from "./api.ts";
+import { desktop, useApi } from "./api.ts";
+import { IS_MAC } from "./keys.ts";
 import { AppFrame } from "./AppFrame.tsx";
 import { BrowserView } from "./BrowserView.tsx";
 import { useT } from "./i18n.tsx";
@@ -34,6 +35,8 @@ export function ToolBody({ tool, onNotice, onAppErrors }: { tool: Tool; onNotice
       return <AppFrame tool={tool} onNotice={onNotice} onErrors={onAppErrors} />;
     case "browser":
       return <BrowserView tool={tool} onNotice={onNotice} />;
+    case "file":
+      return <FileTool tool={tool} patch={patch} onNotice={onNotice} />;
     default:
       return <p className="muted">{t(`Unknown tool kind: ${tool.kind}`, `알 수 없는 도구 형식: ${tool.kind}`)}</p>;
   }
@@ -280,6 +283,88 @@ function NoteTool({ tool, onNotice }: { tool: Tool; onNotice: (m: string) => voi
           timer.current = window.setTimeout(save, NOTE_SAVE_MS);
         }}
         onBlur={save}
+      />
+    </div>
+  );
+}
+
+// ── file: a file on the board (kept in the board's workspace) ────────────────
+const humanSize = (n: number) =>
+  n < 1024 ? `${n} B` : n < 1024 ** 2 ? `${(n / 1024).toFixed(1)} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`;
+/** Opening these would run a program: show them in their folder instead. */
+const RUNS = /\.(exe|bat|cmd|com|msi|ps1|vbs|vbe|js|jse|wsf|wsh|scr|lnk|reg|hta|cpl|jar|app|command|sh|bash|zsh|pkg|scpt|workflow)$/i;
+
+function FileTool({ tool, patch, onNotice }: { tool: Tool; patch: Patch; onNotice: (m: string) => void }) {
+  const api = useApi();
+  const t = useT();
+  const { fileName, path, relPath, size, mime } = tool.props as { fileName: string; path: string; relPath?: string; size: number; mime: string };
+  const image = /^image\/(png|jpeg|gif|webp|bmp|avif|x-icon)$/.test(mime);
+  const text = (/^text\//.test(mime) && mime !== "text/html") || /json|xml|ndjson|yaml/.test(mime);
+  const ext = (fileName.match(/\.([^.]{1,5})$/)?.[1] ?? "").toUpperCase();
+  const [head, setHead] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+  const [note, setNote] = useState<string>(tool.state.note ?? "");
+  const editing = useRef(false);
+  useEffect(() => {
+    if (!editing.current) setNote(tool.state.note ?? "");
+  }, [tool.state.note]);
+  useEffect(() => {
+    if (!text) return;
+    fetch(api.fileUrl(tool.id, 2048))
+      .then((r) => (r.ok ? r.text() : Promise.reject(r.status)))
+      .then(setHead, () => setMissing(true));
+  }, [api, tool.id, path, text]);
+  const copy = () => navigator.clipboard?.writeText(path).then(() => onNotice(t("Copied the path", "경로를 복사했습니다")));
+  const open = async () => {
+    if (RUNS.test(fileName)) return onNotice(t("This file runs a program, so it isn't opened from the board. Show it in its folder instead.", "프로그램을 실행하는 파일이라 보드에서 열지 않습니다. 폴더에서 보기를 쓰세요."));
+    if (desktop) {
+      const err = await desktop.openPath(path);
+      if (err) onNotice(err);
+    } else window.open(api.fileUrl(tool.id), "_blank", "noopener");
+  };
+  return (
+    <div className="file-tool">
+      <div className="file-head">
+        <span className={`file-icon${image ? " image" : text ? " text" : ""}`} aria-hidden>
+          {ext || "FILE"}
+        </span>
+        <div className="file-meta">
+          <b className="file-name" title={fileName}>
+            {fileName}
+          </b>
+          <span className="muted small">
+            {humanSize(size)}
+            {mime && mime !== "application/octet-stream" ? ` · ${mime}` : ""}
+          </span>
+        </div>
+      </div>
+      {image && !missing && <img className="file-preview" src={api.fileUrl(tool.id)} alt={fileName} loading="lazy" draggable={false} onError={() => setMissing(true)} />}
+      {text && head !== null && (
+        <pre className="file-text nowheel">
+          {head}
+          {size > 2048 ? "\n…" : ""}
+        </pre>
+      )}
+      {missing && <p className="file-missing small">{t("The file is no longer where it was.", "파일이 원래 자리에 없습니다.")}</p>}
+      <button className="file-path" onClick={copy} title={t("Copy the path (Claude reads the file there)", "경로 복사 (Claude는 이 경로에서 파일을 읽습니다)")}>
+        {relPath ?? path}
+      </button>
+      <div className="file-actions">
+        <button onClick={open}>{t("Open", "열기")}</button>
+        {desktop && <button onClick={() => void desktop!.showInFolder(path)}>{IS_MAC ? t("Show in Finder", "Finder에서 보기") : t("Show in folder", "폴더에서 보기")}</button>}
+        <button onClick={copy}>{t("Copy path", "경로 복사")}</button>
+      </div>
+      <textarea
+        className="file-note nowheel"
+        rows={2}
+        value={note}
+        placeholder={t("A note about this file (Claude reads it too)", "이 파일에 대한 메모 (Claude도 읽습니다)")}
+        onFocus={() => (editing.current = true)}
+        onChange={(e) => setNote(e.target.value)}
+        onBlur={() => {
+          editing.current = false;
+          if (note !== (tool.state.note ?? "")) void patch([{ op: "replace", path: "/note", value: note }]);
+        }}
       />
     </div>
   );

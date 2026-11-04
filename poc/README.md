@@ -139,6 +139,7 @@ certificate):
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
 | Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). It works like Figma: Move tool (V) = an arrow; click a frame to select it, drag its name label or its edge to move it, drag on empty space to select several (box), Shift+click to add. Hand tool (H), or hold Space, = drag anywhere to pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Scroll / two-finger scroll = pan (a scroll that starts over a browser page scrolls the page), ⌘/Ctrl+scroll or pinch = zoom at the pointer, middle-button drag = pan. Drag the right edge = width (a browser frame: its sides and bottom corners); double-click the name = rename |
 | **Right-click menu** | Send to Claude… · Zoom to selection · Rename · Save to library… · Copy name · Copy ID · Copy · Duplicate · Agent access · Delete, each with its shortcut. Right-click empty space = + Note / + Checklist / + Browser here, Paste here |
+| **Files** | Drop files from your computer on the canvas: each becomes a file frame where it lands (several go side by side). The file is kept in the board's workspace (`files/`), where Claude reads it at its path; the frame shows its name, size and path, a preview (images, the start of text, CSV, JSON, code), Open, Show in folder (desktop app) and Copy path, and a note that Claude reads too. Any size: the desktop app copies the file from where it is (on macOS a clone: instant, no extra space); a browser streams it, with progress, after checking the disk has room. Folders aren't taken yet. Like any frame it has an @name, links, sections, undo, and goes to Claude with its path |
 | **Sections** | Named, coloured areas that group frames, as in Figma. Shift+S draws one (or puts the selected frames in one). A frame belongs to the section its top part is in, so dragging a frame in or out moves it in or out. Drag a section's name to move it with what is in it; its grips resize it (what is in it stays). Double-click the name to rename it; the properties panel picks its colour. Delete removes it with what is in it (⌘/Ctrl+Z brings it back); ⇧⌘G / Ctrl+Shift+G removes just the section. Send a section to Claude, or write `@section1` |
 | **Zoom menu** (the % at the top) | Zoom in / out, to fit, to the selection, 50 / 100 / 200 %, minimap, properties panel, keyboard shortcuts |
 | Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
@@ -214,7 +215,13 @@ what is on screen. There is no Edit or Save button.
 `browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_network` `browser_network_body` `browser_handoff`
 `link_create` `link_update` `link_delete`
 `section_create` `section_update` `section_delete`
+`file_add`
 
+- Files: a file tool's `props.path` is where the file is (`board_list` and `tool_read` show it); the agent reads it
+  with its own tools. `file_add` puts a file on the board: one in the workspace stays where it is, one elsewhere is
+  copied into `files/`. A file tool's details can't be changed, and only the drop routes and `file_add` make one; its
+  content is served to the paired browser only, and anything that could run (HTML, SVG, scripts) downloads instead of
+  opening. The desktop app opens only files inside the board folders, and never one that runs a program.
 - Sections: `board_list` lists them with the tools in them, `tool_read` says which section a tool is in.
   `section_create` draws one around given tools (or at x, y, w, h); `section_update` renames, recolours, moves (the
   tools in it go along) or resizes it; `section_delete` removes it and leaves its tools. Only the person deletes a

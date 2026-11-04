@@ -10,6 +10,9 @@ import { LangProvider, useT } from "./i18n.tsx";
 import { PairGate } from "./PairGate.tsx";
 import "./styles.css";
 
+// A file dropped anywhere but the canvas must not make the window open it (and leave the board).
+for (const type of ["dragover", "drop"]) window.addEventListener(type, (e) => (e as DragEvent).dataTransfer?.types.includes("Files") && e.preventDefault());
+
 function stored<T>(key: string, fallback: T): T {
   try {
     const s = localStorage.getItem(key);

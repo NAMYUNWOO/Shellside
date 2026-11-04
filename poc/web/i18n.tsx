@@ -58,6 +58,7 @@ export function kindLabel(kind: string, t: T): string {
     note: t("Note", "메모"),
     app: t("App", "앱"),
     browser: t("Browser", "브라우저"),
+    file: t("File", "파일"),
   };
   return labels[kind] ?? kind;
 }

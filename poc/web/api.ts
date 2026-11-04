@@ -95,6 +95,15 @@ export const api = {
 };
 
 /** Everything a board's UI calls, bound to that board. */
+/** What the desktop app's window adds (desktop/preload.cjs): a dropped file's path on this machine, and opening a
+ *  board file with its own app. Absent in a browser. */
+export interface DesktopBridge {
+  pathForFile(file: File): string;
+  openPath(path: string): Promise<string>;
+  showInFolder(path: string): Promise<void>;
+}
+export const desktop = (globalThis as { shellside?: DesktopBridge }).shellside;
+
 export function makeApi(boardId: string) {
   const b = (path: string) => `/api/b/${encodeURIComponent(boardId)}${path}`;
   return {
@@ -136,6 +145,32 @@ export function makeApi(boardId: string) {
     appEmit: (toolId: string, type: string, payload: unknown) => call("POST", b(`/apps/${toolId}/emit`), { type, payload }),
     appLog: (toolId: string, level: string, message: string) => call("POST", b(`/apps/${toolId}/logs`), { level, message }),
     appLogs: (toolId: string) => call<{ logs: { at: string; level: string; message: string }[] }>("GET", b(`/apps/${toolId}/logs`)),
+    /** A file dropped on the board → a file tool. The desktop app copies it from its path; a browser streams it
+     *  (any size, with progress). at: the drop point (the frame's top-left). */
+    dropFile(file: File, at: { x: number; y: number }, onProgress: (loaded: number) => void): Promise<Tool> {
+      const path = desktop?.pathForFile(file);
+      if (path) return call<Tool>("POST", b("/file-tools/from-path"), { path, at });
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const q = new URLSearchParams({ name: file.name, x: String(Math.round(at.x)), y: String(Math.round(at.y)) });
+        xhr.open("POST", b(`/file-tools?${q}`));
+        xhr.setRequestHeader("content-type", "application/octet-stream");
+        xhr.setRequestHeader("x-wb-client", "web");
+        xhr.setRequestHeader("x-wb-lang", currentLang());
+        xhr.upload.onprogress = (e) => onProgress(e.loaded);
+        xhr.onload = () => {
+          let data: { error?: string } & Partial<Tool> = {};
+          try {
+            data = JSON.parse(xhr.responseText);
+          } catch {}
+          if (xhr.status >= 200 && xhr.status < 300) resolve(data as Tool);
+          else reject(new ApiError(data.error ?? `HTTP ${xhr.status}`, xhr.status));
+        };
+        xhr.onerror = () => reject(new ApiError("the upload was cut off", 0));
+        xhr.send(file);
+      });
+    },
+    fileUrl: (toolId: string, head?: number) => b(`/file-tools/${toolId}/content${head ? `?head=${head}` : ""}`),
     async upload(toolId: string, file: File) {
       const q = new URLSearchParams({ toolId, name: file.name, type: file.type });
       const res = await fetch(b(`/files?${q}`), { method: "POST", headers: { "content-type": "application/octet-stream", "x-wb-client": "web", "x-wb-lang": currentLang() }, body: file });

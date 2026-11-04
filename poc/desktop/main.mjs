@@ -1,12 +1,12 @@
 // Shellside desktop app: runs the board server (server/index.mjs) in an Electron utility process and shows the board
 // in a window, so nobody has to start anything from a terminal. The board's own terminals still run the person's shell
 // (PowerShell on Windows) with Claude Code in it, exactly as with `npm start`.
-import { app, BrowserWindow, dialog, Menu, nativeTheme, session, shell, utilityProcess } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, session, shell, utilityProcess } from "electron";
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkForUpdates, latestRelease, setAutoCheck, updateSettings } from "./updates.mjs";
 
@@ -187,7 +187,7 @@ function createWindow() {
     title: "Shellside",
     show: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#151515" : "#ffffff",
-    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false },
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false, preload: join(APP_DIR, "preload.cjs") },
   });
   win.once("ready-to-show", () => !SMOKE && win.show());
   win.on("closed", () => (win = null));
@@ -338,9 +338,29 @@ app.on("before-quit", (e) => {
   void requestQuit();
 });
 
+// The window's bridge (preload.cjs): open a board file with its own app, or show it in its folder. Only files inside the
+// board folders, asked by the board's own page.
+const boardFolders = () => resolve(process.env.WB_WORKSPACES || join(homedir(), "Shellside"));
+function boardFile(e, path) {
+  if (!serverUrl || new URL(e.senderFrame?.url ?? "about:blank").origin !== new URL(serverUrl).origin) return null;
+  const abs = resolve(String(path));
+  const rel = relative(boardFolders(), abs);
+  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? abs : null;
+}
+ipcMain.handle("shellside:open-path", (e, path) => {
+  const abs = boardFile(e, path);
+  return abs ? shell.openPath(abs) : T("Only files in the board folders open from here.", "보드 폴더 안의 파일만 여기서 열 수 있습니다.");
+});
+ipcMain.handle("shellside:show-in-folder", (e, path) => {
+  const abs = boardFile(e, path);
+  if (abs) shell.showItemInFolder(abs);
+});
+
 /** CI: the board loads, a terminal starts the shell, `wb` runs in it with the app's runtime. */
 async function smoke(file) {
+  const SMOKE_FILE = join(app.getPath("temp"), "shellside-smoke.csv");
   const result = { platform: process.platform, url: serverUrl };
+  writeFileSync(SMOKE_FILE, "name,score\nkim,3\n");
   try {
     await new Promise((resolve, reject) => {
       win.webContents.once("did-finish-load", resolve);
@@ -351,6 +371,9 @@ async function smoke(file) {
       await win.webContents.executeJavaScript(`(async () => {
         const out = { title: document.title };
         out.health = await (await fetch("/api/health")).json();
+        out.bridge = typeof window.shellside?.pathForFile === "function";
+        const dropped = await fetch("/api/b/main/file-tools/from-path", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: ${JSON.stringify(SMOKE_FILE)} }) });
+        out.file = dropped.ok ? (await dropped.json()).props : { error: (await dropped.json()).error };
         out.claude = await (await fetch("/api/agent/auth")).json();
         const ws = new WebSocket("ws://" + location.host + "/ws/pty?board=main");
         ws.binaryType = "arraybuffer";
@@ -374,7 +397,7 @@ async function smoke(file) {
         return out;
       })()`),
     );
-    result.ok = result.health?.ok === true && !!result.shell && result.echo && result.wb;
+    result.ok = result.health?.ok === true && !!result.shell && result.echo && result.wb && result.bridge && /^\/|^[A-Za-z]:/.test(result.file?.path ?? "");
     // With SHELLSIDE_UPDATE_URL (a test server), also: the update check reads the latest version.
     if (process.env.SHELLSIDE_UPDATE_URL) result.update = await latestRelease().catch((err) => ({ error: String(err?.message ?? err) }));
   } catch (err) {

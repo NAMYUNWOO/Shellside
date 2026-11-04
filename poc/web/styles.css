@@ -2515,3 +2515,142 @@ textarea.browser-keys {
   margin: 0;
   padding: 0 0 0 14px;
 }
+
+/* ── file tools: a file on the board ── */
+.file-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.file-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 48px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.file-icon.image {
+  color: #14ae5c;
+}
+.file-icon.text {
+  color: var(--accent);
+}
+.file-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--bg);
+}
+.file-text {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.file-missing {
+  margin: 0;
+  color: var(--danger, #e5484d);
+}
+.file-path {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-path:hover {
+  color: var(--accent);
+}
+.file-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.file-actions button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.file-note {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  font-size: 12px;
+}
+/* Files on their way onto the board (above the command bar). */
+.react-flow__panel.uploads {
+  margin-bottom: 76px;
+}
+.uploads {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.upload {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+.upload-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.upload.failed .upload-size {
+  color: var(--danger, #e5484d);
+}
+.upload-bar {
+  grid-column: 1 / -1;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent) calc(var(--p, 0) * 100%), var(--line) 0);
+}
+.upload.done .upload-bar {
+  background: #14ae5c;
+}

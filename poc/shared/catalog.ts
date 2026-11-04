@@ -88,6 +88,19 @@ export function browserUrlProblem(url: string): string | null {
   return null;
 }
 
+// ── file: a file on the board. The person drops one on the canvas (or the agent adds one with file_add); it is kept in
+// the board's workspace (files/), where the agent reads it. Its details are fixed once it is made.
+export const fileProps = z.object({
+  fileName: z.string().min(1).max(255),
+  /** Absolute path on this machine. */
+  path: z.string().min(1).max(4000),
+  /** The same, relative to the board's workspace (when it is inside it). */
+  relPath: z.string().max(4000).optional(),
+  size: z.number().int().min(0),
+  mime: z.string().max(200).default(""),
+});
+export const fileState = z.object({ note: z.string().max(20000).default("") });
+
 export const KINDS = {
   checklist: { props: checklistProps, state: checklistState },
   form: { props: formProps, state: formState },
@@ -95,6 +108,7 @@ export const KINDS = {
   note: { props: noteProps, state: noteState },
   app: { props: appProps, state: appState },
   browser: { props: browserProps, state: browserState },
+  file: { props: fileProps, state: fileState },
 } as const;
 export type ToolKind = keyof typeof KINDS;
 export const TOOL_KINDS = Object.keys(KINDS) as ToolKind[];
@@ -111,7 +125,7 @@ export interface Layout {
   h?: number;
 }
 
-export const DEFAULT_WIDTH: Record<string, number> = { checklist: 380, form: 380, note: 380, table: 600, app: 520, browser: 960 };
+export const DEFAULT_WIDTH: Record<string, number> = { checklist: 380, form: 380, note: 380, table: 600, app: 520, browser: 960, file: 340 };
 /** A browser frame has a fixed height (the page scrolls inside it); other frames grow with their content. */
 export const BROWSER_HEIGHT = { default: 640, min: 260, max: 2000 };
 /** A browser frame's width: wider than other frames may be, so a page can have a full-HD layout. */
@@ -329,6 +343,8 @@ export function defaultState(kind: ToolKind): unknown {
       return {};
     case "browser":
       return { url: "about:blank", title: "", control: "shared", tabs: [], activeTab: 0 };
+    case "file":
+      return { note: "" };
   }
 }
 
@@ -434,6 +450,12 @@ can share it: keep each app focused and connect them with a channel.
 Shared shape for tabular data, so separately built apps connect without glue code (it matches the table tool):
   { columns: [{ key, label, type?: "text"|"number"|"select"|"checkbox" }], rows: [{ id, [key]: value }] }
 Producers publish this shape; consumers accept it (and may also accept a table tool via useTool).
+
+## kind: "file"  — a file on the board
+The person drops files on the board; each becomes a file tool. The file is kept in the board's workspace (files/):
+read it with your own tools at props.path. To put a file you made on the board, call file_add (path) — not tool_create.
+props: { fileName, path, relPath?, size, mime }   (fixed)
+state: { note }   (a short note about the file, for the person and you; e.g. what it holds, or your summary)
 
 ## kind: "browser"  — a real web browser on the board
 A Chrome tab shown live on the board. The person browses in it with mouse and keyboard; you read and drive the same

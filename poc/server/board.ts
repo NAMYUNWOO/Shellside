@@ -284,8 +284,12 @@ export class Board {
   createTool(
     actor: Actor,
     input: { title: string; name?: string; description?: string; kind: ToolKind; props?: unknown; state?: unknown; agentAccess?: "read" | "write"; id?: string; width?: number; height?: number; at?: { x: number; y: number } },
+    /** fileOk: made by the file routes (dropped, file_add) or brought back by undo, which checked the file. */
+    opts: { fileOk?: boolean } = {},
   ): Tool {
     if (!TOOL_KINDS.includes(input.kind)) throw new BoardError(`unknown kind "${input.kind}". Use one of: ${TOOL_KINDS.join(", ")}`);
+    // A file tool points at a file on this machine: only the file routes make one (they check the file exists).
+    if (input.kind === "file" && !opts.fileOk) throw new BoardError('a file tool is made by dropping a file on the board, or with file_add (path); not with tool_create');
     const v = validateTool(input.kind, input.props, input.state);
     if (!v.ok) throw new BoardError(v.error);
     const id = input.id && !this.tools.has(input.id) ? input.id : shortId(input.kind);
@@ -328,6 +332,7 @@ export class Board {
     this.checkAccess(actor, t);
     this.checkVersion(t, input.baseVersion);
     if (actor === "agent" && input.agentAccess !== undefined) throw new BoardError("the agent cannot change its own access level", 403);
+    if (t.kind === "file" && input.props !== undefined) throw new BoardError("a file tool's details (path, size…) are fixed; add the file again instead", 400);
     const props = input.props !== undefined ? input.props : t.props;
     const v = validateTool(t.kind, props, t.state);
     if (!v.ok) throw new BoardError(v.error);
@@ -948,6 +953,8 @@ function estimateHeight(t: Tool): number {
       return t.props?.height ?? 320;
     case "browser":
       return BROWSER_HEIGHT.default;
+    case "file":
+      return /^image\//.test(t.props?.mime ?? "") ? 320 : 170;
     default:
       return 180;
   }
