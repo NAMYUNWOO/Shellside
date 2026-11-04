@@ -1,10 +1,28 @@
-import { defineConfig } from "vite";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+
+/** Monaco bundles code from other projects (DOMPurify, marked…): their notices go into the notices file too. */
+const monacoNotices = (): Plugin => ({
+  name: "monaco-notices",
+  apply: "build",
+  writeBundle(options) {
+    const file = join(options.dir ?? "dist", "third-party-licenses.md");
+    const notices = join("node_modules", "monaco-editor", "ThirdPartyNotices.txt");
+    if (!existsSync(file) || !existsSync(notices)) return;
+    appendFileSync(file, `\n\n## Code inside monaco-editor\n\nMonaco includes code from other projects. Their notices, from its ThirdPartyNotices.txt:\n\n\`\`\`\n${readFileSync(notices, "utf8").trim()}\n\`\`\`\n`);
+  },
+});
 
 const target = `http://127.0.0.1:${process.env.WB_PORT ?? 4100}`;
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), monacoNotices()],
+  resolve: {
+    // Monaco carries its own copy of DOMPurify, older than the fixed one: use the package (package.json pins it).
+    alias: [{ find: /^\.\/dompurify\/dompurify\.js$/, replacement: "dompurify" }],
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,

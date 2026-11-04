@@ -1,6 +1,6 @@
 // Catalog renderers. Each draws a tool from its JSON and turns the person's edits into JSON Patches.
 // The canvas frame (Canvas.tsx) and the inspector (Inspector.tsx) wrap these.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ChecklistItem, FormField, TableColumn, Tool } from "../shared/catalog.ts";
 import { desktop, useApi } from "./api.ts";
 import { IS_MAC } from "./keys.ts";
@@ -9,6 +9,8 @@ import { BrowserView } from "./BrowserView.tsx";
 import { useT } from "./i18n.tsx";
 
 type Patch = (ops: unknown[]) => Promise<void>;
+// Monaco is big: it loads the first time a code editor shows, not with the board.
+const CodeTool = lazy(() => import("./CodeTool.tsx"));
 const newId = (prefix: string) => `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
 
 /** The working surface of a tool, drawn inside its canvas frame. */
@@ -37,6 +39,12 @@ export function ToolBody({ tool, onNotice, onAppErrors }: { tool: Tool; onNotice
       return <BrowserView tool={tool} onNotice={onNotice} />;
     case "file":
       return <FileTool tool={tool} patch={patch} onNotice={onNotice} />;
+    case "code":
+      return (
+        <Suspense fallback={<p className="code-empty muted">{t("Loading the editor…", "편집기를 불러오는 중…")}</p>}>
+          <CodeTool tool={tool} patch={patch} onNotice={onNotice} />
+        </Suspense>
+      );
     default:
       return <p className="muted">{t(`Unknown tool kind: ${tool.kind}`, `알 수 없는 도구 형식: ${tool.kind}`)}</p>;
   }
@@ -301,6 +309,8 @@ function FileTool({ tool, patch, onNotice }: { tool: Tool; patch: Patch; onNotic
   const image = /^image\/(png|jpeg|gif|webp|bmp|avif|x-icon)$/.test(mime);
   const text = (/^text\//.test(mime) && mime !== "text/html") || /json|xml|ndjson|yaml/.test(mime);
   const ext = (fileName.match(/\.([^.]{1,5})$/)?.[1] ?? "").toUpperCase();
+  // Text (code, HTML, SVG, and files of no known kind, which may well be text) opens in a code editor; the server checks.
+  const editable = size <= 5 * 1024 * 1024 && (text || /^text\/html$|svg|^application\/octet-stream$/.test(mime));
   const [head, setHead] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
   const [note, setNote] = useState<string>(tool.state.note ?? "");
@@ -321,6 +331,14 @@ function FileTool({ tool, patch, onNotice }: { tool: Tool; patch: Patch; onNotic
       const err = await desktop.openPath(path);
       if (err) onNotice(err);
     } else window.open(api.fileUrl(tool.id), "_blank", "noopener");
+  };
+  const edit = async () => {
+    const L = tool.layout;
+    try {
+      await api.openCode(path, L ? { x: L.x + L.w + 40, y: L.y } : undefined);
+    } catch (err) {
+      onNotice((err as Error).message);
+    }
   };
   return (
     <div className="file-tool">
@@ -351,6 +369,11 @@ function FileTool({ tool, patch, onNotice }: { tool: Tool; patch: Patch; onNotic
       </button>
       <div className="file-actions">
         <button onClick={open}>{t("Open", "열기")}</button>
+        {editable && !missing && (
+          <button onClick={edit} title={t("Open it in a code editor on the board", "보드의 코드 편집기로 열기")}>
+            {t("Edit", "편집")}
+          </button>
+        )}
         {desktop && <button onClick={() => void desktop!.showInFolder(path)}>{IS_MAC ? t("Show in Finder", "Finder에서 보기") : t("Show in folder", "폴더에서 보기")}</button>}
         <button onClick={copy}>{t("Copy path", "경로 복사")}</button>
       </div>

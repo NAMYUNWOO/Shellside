@@ -2,12 +2,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, ReactFlowProvider, useReactFlow } from "@xyflow/react";
 import { frameAnchor, inSection, SECTION_COLORS, type Link, type LinkDirection, type Section, type SectionColor, type SectionLayout, type Tool } from "../shared/catalog.ts";
-import { useApi, ApiError, loginProblem, type AgentStatus } from "./api.ts";
+import { desktop, useApi, ApiError, loginProblem, type AgentStatus } from "./api.ts";
 import { ShellsideMark } from "./ShellsideMark.tsx";
 import { AskCard } from "./Asks.tsx";
 import { BoardCanvas, useCanvasActions, type CanvasTool, type LayoutChange } from "./Canvas.tsx";
 import { ContextMenu, type MenuItem } from "./ContextMenu.tsx";
-import { SaveToLibraryDialog, SendToClaudeDialog } from "./Dialogs.tsx";
+import { CodeOpenDialog, SaveToLibraryDialog, SendToClaudeDialog } from "./Dialogs.tsx";
 import { Inspector } from "./Inspector.tsx";
 import { LibraryPanel } from "./Library.tsx";
 import { LiveProvider } from "./live.ts";
@@ -15,9 +15,12 @@ import { useBoard, useNow } from "./useBoard.ts";
 import { useT } from "./i18n.tsx";
 import { isMod, kbd } from "./keys.ts";
 import { ShortcutsDialog } from "./Shortcuts.tsx";
+import { builtins, type BuiltinKind } from "./builtins.ts";
+import { codeCommand } from "./codeFocus.ts";
 
 const isEditable = (el: Element | null) =>
-  !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
+  !!el &&
+  (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable || !!el.closest(".monaco-editor"));
 /** Keys belong to something else: a text field, the terminal, a browser page, an open menu or dialog. */
 const keysTaken = () => {
   const el = document.activeElement;
@@ -86,6 +89,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   const [spaceHeld, setSpaceHeld] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [zoomMenu, setZoomMenu] = useState<{ x: number; y: number } | null>(null);
+  const [insertMenu, setInsertMenu] = useState<{ x: number; y: number } | null>(null);
   const pointer = useRef<{ x: number; y: number } | null>(null);
   const onPointer = useCallback((p: { x: number; y: number } | null) => (pointer.current = p), []);
   /** Where new frames go: under the pointer when it is on the canvas, else the middle of the view. */
@@ -103,6 +107,8 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   /** Shift (or ⌘/Ctrl) held: a click adds to the selection instead of replacing it. */
   const adding = useRef(false);
   const [saveTool, setSaveTool] = useState<Tool | null>(null);
+  /** Where a code editor being opened goes (its top-left), while the open dialog shows. */
+  const [codeAt, setCodeAt] = useState<{ x: number; y: number } | null>(null);
   const [appErrors, setAppErrors] = useState<Record<string, number>>({});
   const [activeUntil, setActiveUntil] = useState<Record<string, number>>({});
   const [tick, setTick] = useState(0);
@@ -422,6 +428,31 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     window.setTimeout(() => setUploads((u) => u.filter((x) => !batch.some((b) => b.key === x.key) || x.state === "sending")), 2500);
   };
 
+  /** Folders dropped on the board open in code editors. Only the desktop app knows where a dropped folder is. */
+  const dropFolders = async (folders: File[], at: { x: number; y: number }) => {
+    const paths = folders.map((f) => desktop?.pathForFile(f) ?? "").filter(Boolean);
+    if (!paths.length)
+      return onNotice(
+        t(
+          "A folder opens in a code editor from the desktop app. Here, use + → Code editor and type its path.",
+          "폴더는 데스크톱 앱에서 코드 편집기로 열립니다. 여기서는 + → 코드 편집기에서 경로를 입력하세요.",
+        ),
+      );
+    const made: string[] = [];
+    for (const [i, path] of paths.entries()) {
+      try {
+        made.push((await api.openCode(path, { x: at.x + i * 940, y: at.y })).id);
+      } catch (err) {
+        onNotice((err as Error).message);
+      }
+    }
+    if (made.length) {
+      setSelectedIds(made);
+      setSelectedSectionIds([]);
+      recordCreate(made, t("Open folder", "폴더 열기"));
+    }
+  };
+
   const sendSections = (ids: string[]) => {
     setSendSectionIds(ids);
     setSendIds([]);
@@ -483,15 +514,39 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   };
   const duplicate = (ids: string[]) => copyTools(ids.map((id) => toolsById[id]).filter(Boolean) as Tool[]);
 
-  const addTool = async (kind: "note" | "checklist" | "browser", at = cam.center()) => {
+  type AddKind = "note" | "checklist" | "browser" | "table" | "form";
+  const addTool = async (kind: AddKind, at = cam.center()) => {
+    const input: Record<AddKind, Partial<Tool> & { at?: { x: number; y: number } }> = {
+      note: { kind, title: t("Note", "메모"), state: { text: "" }, at },
+      checklist: { kind, title: t("Checklist", "체크리스트"), state: { items: [] }, at },
+      browser: { kind, title: t("Browser", "브라우저"), state: { url: "about:blank" } }, // big: goes to a free spot, the camera follows
+      table: {
+        kind,
+        title: t("Table", "표"),
+        props: {
+          columns: [
+            { key: "item", label: t("Item", "항목"), type: "text" },
+            { key: "status", label: t("Status", "상태"), type: "select", options: [t("To do", "할 일"), t("Doing", "진행 중"), t("Done", "완료")] },
+            { key: "note", label: t("Note", "메모"), type: "text" },
+          ],
+        },
+        state: { rows: [] },
+        at,
+      },
+      form: {
+        kind,
+        title: t("Form", "폼"),
+        props: {
+          fields: [
+            { name: "title", label: t("Title", "제목"), type: "text" },
+            { name: "details", label: t("Details", "내용"), type: "textarea" },
+          ],
+        },
+        at,
+      },
+    };
     try {
-      const created = await api.createTool(
-        kind === "note"
-          ? { kind, title: t("Note", "메모"), state: { text: "" }, at }
-          : kind === "browser"
-            ? { kind, title: t("Browser", "브라우저"), state: { url: "about:blank" } } // big: goes to a free spot, the camera follows
-            : { kind, title: t("Checklist", "체크리스트"), state: { items: [] }, at },
-      );
+      const created = await api.createTool(input[kind]);
       setSelectedIds([created.id]);
       recordCreate([created.id], t("Add", "추가"));
       if (kind === "browser") window.setTimeout(() => cam.focusTool(created.id), 80);
@@ -499,8 +554,25 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       onNotice((err as Error).message);
     }
   };
-
+  // ── built-in components (library and the + menu) ──
+  const filePicker = useRef<HTMLInputElement>(null);
+  const pickAt = useRef<{ x: number; y: number } | null>(null);
+  const addBuiltin = (kind: BuiltinKind, at = cam.center()) => {
+    if (kind === "file") {
+      pickAt.current = at;
+      return filePicker.current?.click();
+    }
+    if (kind === "section") return drawSection({ x: Math.round(at.x - 320), y: Math.round(at.y - 120), w: 640, h: 420 });
+    if (kind === "code") return setCodeAt({ x: Math.round(at.x - 450), y: Math.round(at.y - 80) });
+    return addTool(kind, at);
+  };
+  const codeOpened = (tool: Tool) => {
+    setSelectedIds([tool.id]);
+    recordCreate([tool.id], t("Add", "추가"));
+    window.setTimeout(() => cam.focusTool(tool.id, { onlyIfHidden: true }), 80);
+  };
   const addTemplate = async (id: string, at = cam.center()) => {
+    if (id.startsWith("builtin:")) return addBuiltin(id.slice(8) as BuiltinKind, at);
     try {
       const created = await api.useTemplate(id, at);
       setSelectedIds([created.id]);
@@ -519,7 +591,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       adding.current = e.shiftKey || e.metaKey || e.ctrlKey;
       const el = document.activeElement;
       // Esc while editing inside a frame: stop editing and select that frame (as leaving a text in Figma).
-      if (e.key === "Escape" && isEditable(el) && el?.closest(".react-flow__node") && !document.querySelector('[role="menu"], .modal')) {
+      if (e.key === "Escape" && isEditable(el) && el?.closest(".react-flow__node") && !el.closest(".monaco-editor") && !document.querySelector('[role="menu"], .modal')) {
         const id = el.closest(".react-flow__node")?.getAttribute("data-id");
         (el as HTMLElement).blur();
         if (id) setSelectedIds([id]);
@@ -539,6 +611,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       else if (plain && !e.shiftKey && code === "KeyN") (take(), addTool("note", dropPoint()));
       else if (plain && !e.shiftKey && code === "KeyC") (take(), addTool("checklist", dropPoint()));
       else if (plain && !e.shiftKey && code === "KeyB") (take(), addTool("browser"));
+      else if (plain && !e.shiftKey && code === "KeyE") (take(), addBuiltin("code", dropPoint()));
       else if (plain && e.shiftKey && code === "Digit0") (take(), cam.zoomTo(1));
       else if (plain && e.shiftKey && code === "Digit1") (take(), cam.fitAll());
       else if (plain && e.shiftKey && code === "Digit2") (take(), selectedIds.length ? fitTo(selectedIds) : selectedSectionIds.length ? fitSections(selectedSectionIds) : cam.fitAll());
@@ -595,12 +668,13 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
     if (!active) return;
     const w = window as unknown as { __wbSelectAll?: () => boolean; __wbUndo?: () => boolean; __wbRedo?: () => boolean };
     w.__wbSelectAll = () => {
+      if (codeCommand("editor.action.selectAll")) return true;
       if (keysTaken()) return false;
       setSelectedIds(tools.map((tl) => tl.id));
       return true;
     };
-    w.__wbUndo = () => (keysTaken() ? false : (void runHistory("undo"), true));
-    w.__wbRedo = () => (keysTaken() ? false : (void runHistory("redo"), true));
+    w.__wbUndo = () => codeCommand("undo") || (keysTaken() ? false : (void runHistory("undo"), true));
+    w.__wbRedo = () => codeCommand("redo") || (keysTaken() ? false : (void runHistory("redo"), true));
     return () => {
       delete w.__wbSelectAll;
       delete w.__wbUndo;
@@ -688,6 +762,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         { label: t("+ Note here", "+ 메모 여기에"), hint: "N", onSelect: () => addTool("note", m.at) },
         { label: t("+ Checklist here", "+ 체크리스트 여기에"), hint: "C", onSelect: () => addTool("checklist", m.at) },
         { label: t("+ Browser here", "+ 브라우저 여기에"), hint: "B", onSelect: () => addTool("browser", m.at) },
+        { label: t("+ Code editor here…", "+ 코드 편집기 여기에…"), hint: "E", onSelect: () => addBuiltin("code", m.at) },
         { label: t("+ Section here", "+ 섹션 여기에"), hint: kbd("shift+s"), onSelect: () => drawSection({ x: Math.round(m.at.x), y: Math.round(m.at.y), w: 640, h: 420 }) },
         ...(copied ? [{ label: t("Paste here", "여기에 붙여넣기"), hint: kbd("mod+v"), onSelect: () => copyTools(copied!.tools, m.at) }] : []),
         { label: libraryOpen ? t("Close library", "라이브러리 닫기") : t("Open library", "라이브러리 열기"), onSelect: () => setLibraryOpen(!libraryOpen) },
@@ -721,7 +796,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
               },
             },
             // A saved component is remade without its file, so files stay out of the library.
-            ...(one.kind === "file" ? [] : [{ label: t("Save to library…", "라이브러리에 저장…"), onSelect: () => setSaveTool(one) }]),
+            ...(one.kind === "file" || one.kind === "code" ? [] : [{ label: t("Save to library…", "라이브러리에 저장…"), onSelect: () => setSaveTool(one) }]),
             ...(one.name
               ? [{ label: t("Copy name", "이름 복사"), hint: `@${one.name}`, onSelect: () => navigator.clipboard?.writeText(`@${one.name}`).then(() => onNotice(t(`Copied @${one.name}`, `@${one.name} 복사됨`))) }]
               : []),
@@ -754,7 +829,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       <header className="pane-head board-head">
         <h2 className="board-name">{boardName}</h2>
         <span className={`status ${connected ? "status-open" : "status-closed"}`}>{connected ? t("Live", "실시간") : t("Reconnecting", "재연결 중")}</span>
-        <button className={libraryOpen ? "toggle on lib" : "toggle lib"} aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} title={t("Saved components", "저장한 컴포넌트")}>
+        <button className={libraryOpen ? "toggle on lib" : "toggle lib"} aria-pressed={libraryOpen} onClick={() => setLibraryOpen(!libraryOpen)} title={t("Components: built in and saved", "컴포넌트: 기본 제공과 저장한 것")}>
           {t("Library", "라이브러리")} <span className="count">{library.length}</span>
         </button>
         <div className="spacer" />
@@ -796,6 +871,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
             onSectionMenu={(pos, id) => setSectionMenu({ ...pos, id })}
             onDrawSection={drawSection}
             onDropFiles={dropFiles}
+            onDropFolders={dropFolders}
             onSectionMoved={onSectionMoved}
             onSectionRename={onSectionRename}
             showMinimap={minimap}
@@ -868,7 +944,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
                 tools={tools}
                 selected={selected}
                 selectedSections={selectedSections}
-                onAdd={(k) => addTool(k)}
+                onInsert={(r) => setInsertMenu({ x: r.left, y: r.top - 8 })}
                 onShortcuts={() => setShortcutsOpen(true)}
                 onSend={async (prompt) => {
                   try {
@@ -964,6 +1040,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         />
       )}
       {saveTool && <SaveToLibraryDialog tool={saveTool} onClose={() => setSaveTool(null)} onNotice={onNotice} />}
+      {codeAt && <CodeOpenDialog boardId={boardId} at={codeAt} onClose={() => setCodeAt(null)} onOpened={codeOpened} onNotice={onNotice} />}
       {zoomMenu && (
         <ContextMenu
           x={zoomMenu.x}
@@ -986,6 +1063,27 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         />
       )}
       {shortcutsOpen && <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />}
+      {insertMenu && (
+        <ContextMenu
+          x={insertMenu.x}
+          y={insertMenu.y}
+          above
+          title={t("Add", "추가")}
+          items={builtins(t).map((b) => ({ label: b.name, hint: b.key, onSelect: () => addBuiltin(b.kind) }))}
+          onClose={() => setInsertMenu(null)}
+        />
+      )}
+      <input
+        ref={filePicker}
+        type="file"
+        multiple
+        hidden
+        onChange={(e) => {
+          const files = [...(e.currentTarget.files ?? [])];
+          e.currentTarget.value = "";
+          if (files.length) dropFiles(files, pickAt.current ?? cam.center());
+        }}
+      />
     </section>
     </LiveProvider>
   );
@@ -1070,7 +1168,7 @@ function CommandBar({
   onTool,
   tools,
   selected,
-  onAdd,
+  onInsert,
   onShortcuts,
   onSend,
   onNotice,
@@ -1081,7 +1179,8 @@ function CommandBar({
   tools: Tool[];
   selected: Tool[];
   selectedSections: Section[];
-  onAdd: (k: "note" | "checklist" | "browser") => void;
+  /** The + button: the menu of built-in components (opens above it). */
+  onInsert: (anchor: DOMRect) => void;
   onShortcuts: () => void;
   onSend: (prompt: string) => Promise<void>;
   onNotice: (m: string) => void;
@@ -1187,17 +1286,18 @@ function CommandBar({
             <rect x="3.6" y="1.6" width="5" height="3.2" rx="1" fill="currentColor" />
           </svg>
         </button>
+        <button
+          className="tool insert"
+          aria-haspopup="menu"
+          aria-label={t("Add a component", "컴포넌트 추가")}
+          data-tip={t("Add: note, checklist, table, form, browser, code editor, file, section", "추가: 메모, 체크리스트, 표, 폼, 브라우저, 코드 편집기, 파일, 섹션")}
+          onClick={(e) => onInsert(e.currentTarget.getBoundingClientRect())}
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
       </div>
-      <span className="sep" />
-      <button className="ghost" onClick={() => onAdd("note")} data-tip={`${t("Note", "메모")}   N`}>
-        {t("+ Note", "+ 메모")}
-      </button>
-      <button className="ghost" onClick={() => onAdd("checklist")} data-tip={`${t("Checklist", "체크리스트")}   C`}>
-        {t("+ Checklist", "+ 체크리스트")}
-      </button>
-      <button className="ghost" onClick={() => onAdd("browser")} data-tip={`${t("Browser you and Claude share", "나와 Claude가 함께 쓰는 브라우저")}   B`}>
-        {t("+ Browser", "+ 브라우저")}
-      </button>
       <span className="sep" />
       {selected.length + selectedSections.length > 0 && (
         <span className="ctx-chip" title={[...selectedSections.map((x) => x.title), ...selected.map((tl) => tl.title)].join(", ")}>

@@ -279,11 +279,15 @@ function safeJson(v: unknown) {
   }
 }
 const log = (level: string, message: string) => post({ method: "log", params: { level, message } });
+/** Monaco says it runs without web workers (an app's sandbox has none): expected, so not for the agent's logs. */
+const NO_WORKERS = "shellside: apps run Monaco without web workers";
+const QUIET = /^Could not create web worker|^shellside: apps run Monaco without web workers/;
 for (const level of ["error", "warn", "log", "info"] as const) {
   const orig = console[level].bind(console);
   console[level] = (...args: unknown[]) => {
     orig(...args);
-    log(level, fmt(args));
+    const message = fmt(args);
+    if (!QUIET.test(message)) log(level, message);
   };
 }
 const lineOffset: number = init.lineOffset ?? 0;
@@ -310,13 +314,169 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err
   }
 }
 
+// ── CodeEditor: Monaco (VS Code's editor) in an app ──
+// Loaded from the board (/sandbox/monaco.js, next to this runtime) the first time an app shows one.
+const SANDBOX_BASE = (() => {
+  const src = (document.currentScript as HTMLScriptElement | null)?.src;
+  return src ? new URL(".", src).href : "";
+})();
+let monacoLoading: Promise<any> | null = null;
+function loadMonaco(): Promise<any> {
+  const w = window as any;
+  if (w.__wbMonaco) return Promise.resolve(w.__wbMonaco);
+  monacoLoading ??= new Promise((resolve, reject) => {
+    // No web workers in an app: Monaco runs their work in the page (fine for an editor's worth of text).
+    w.MonacoEnvironment = {
+      getWorker() {
+        throw new Error(NO_WORKERS);
+      },
+    };
+    const s = document.createElement("script");
+    s.src = `${SANDBOX_BASE}monaco.js`;
+    s.crossOrigin = "anonymous";
+    s.onload = () => (w.__wbMonaco ? resolve(w.__wbMonaco) : reject(new Error("the code editor did not start")));
+    s.onerror = () => {
+      monacoLoading = null;
+      reject(new Error("the code editor could not be loaded from the board"));
+    };
+    document.head.appendChild(s);
+  });
+  return monacoLoading;
+}
+
+type CodeEditorProps = {
+  /** The text (controlled). Or defaultValue, to start with it and only hear changes. */
+  value?: string;
+  defaultValue?: string;
+  onChange?: (value: string) => void;
+  /** ⌘/Ctrl+S in the editor. */
+  onSave?: (value: string) => void;
+  /** "javascript", "typescript", "python", "json", "sql", "markdown", "yaml", "html", "css", "go", "rust"… (colors only). */
+  language?: string;
+  /** Default 300 (px, or any CSS height). */
+  height?: number | string;
+  readOnly?: boolean;
+  /** "light", "dark", or "auto" (the system's, the default). */
+  theme?: "light" | "dark" | "auto";
+  lineNumbers?: boolean;
+  minimap?: boolean;
+  wordWrap?: boolean;
+  fontSize?: number;
+  /** Any other Monaco editor option (editor.IStandaloneEditorConstructionOptions). */
+  options?: Record<string, unknown>;
+  /** The Monaco editor and the monaco API, for anything more (markers, decorations, commands). */
+  onMount?: (editor: any, monaco: any) => void;
+  className?: string;
+  style?: React.CSSProperties;
+};
+
+const monacoTheme = (theme?: string) =>
+  theme === "dark" || (theme !== "light" && typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches) ? "vs-dark" : "vs";
+
+/** A code editor for an app: Monaco, the editor of VS Code. */
+export function CodeEditor(props: CodeEditorProps) {
+  const host = React.useRef<HTMLDivElement>(null);
+  const editorRef = React.useRef<any>(null);
+  const monacoRef = React.useRef<any>(null);
+  const latest = React.useRef(props);
+  latest.current = props;
+  const applying = React.useRef(false);
+  const [problem, setProblem] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let gone = false;
+    loadMonaco().then(
+      (monaco) => {
+        if (gone || !host.current) return;
+        const p = latest.current;
+        monacoRef.current = monaco;
+        const editor = monaco.editor.create(host.current, {
+          value: p.value ?? p.defaultValue ?? "",
+          language: p.language ?? "plaintext",
+          readOnly: !!p.readOnly,
+          theme: monacoTheme(p.theme),
+          automaticLayout: true,
+          minimap: { enabled: !!p.minimap },
+          lineNumbers: p.lineNumbers === false ? "off" : "on",
+          wordWrap: p.wordWrap ? "on" : "off",
+          fontSize: p.fontSize ?? 13,
+          scrollBeyondLastLine: false,
+          fixedOverflowWidgets: true,
+          ...p.options,
+        });
+        editorRef.current = editor;
+        editor.onDidChangeModelContent(() => {
+          if (!applying.current) latest.current.onChange?.(editor.getValue());
+        });
+        editor.onKeyDown((e: any) => {
+          if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.keyCode === monaco.KeyCode.KeyS && latest.current.onSave) {
+            e.preventDefault();
+            latest.current.onSave(editor.getValue());
+          }
+        });
+        p.onMount?.(editor, monaco);
+      },
+      (err) => !gone && setProblem((err as Error).message),
+    );
+    return () => {
+      gone = true;
+      const editor = editorRef.current;
+      editorRef.current = null;
+      editor?.getModel()?.dispose();
+      editor?.dispose();
+    };
+  }, []);
+
+  // A new value from outside (state, another app, the agent): take it, keeping undo and the cursor.
+  React.useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || props.value === undefined || props.value === editor.getValue()) return;
+    const model = editor.getModel();
+    applying.current = true;
+    try {
+      editor.pushUndoStop();
+      model.pushEditOperations(editor.getSelections(), [{ range: model.getFullModelRange(), text: props.value }], () => editor.getSelections());
+      editor.pushUndoStop();
+    } finally {
+      applying.current = false;
+    }
+  }, [props.value]);
+  React.useEffect(() => {
+    const editor = editorRef.current;
+    if (editor && props.language) monacoRef.current.editor.setModelLanguage(editor.getModel(), props.language);
+  }, [props.language]);
+  React.useEffect(() => {
+    editorRef.current?.updateOptions({
+      readOnly: !!props.readOnly,
+      minimap: { enabled: !!props.minimap },
+      lineNumbers: props.lineNumbers === false ? "off" : "on",
+      wordWrap: props.wordWrap ? "on" : "off",
+      fontSize: props.fontSize ?? 13,
+    });
+  }, [props.readOnly, props.minimap, props.lineNumbers, props.wordWrap, props.fontSize]);
+  React.useEffect(() => {
+    if (editorRef.current) monacoRef.current.editor.setTheme(monacoTheme(props.theme));
+  }, [props.theme]);
+
+  const height = props.height ?? 300;
+  return React.createElement(
+    "div",
+    {
+      className: props.className,
+      style: { position: "relative", height: typeof height === "number" ? `${height}px` : height, border: "1px solid rgba(128,128,128,.3)", borderRadius: 6, overflow: "hidden", ...props.style },
+    },
+    React.createElement("div", { ref: host, style: { position: "absolute", inset: 0 } }),
+    problem && React.createElement("pre", { style: { position: "absolute", inset: 0, margin: 0, padding: 8, color: "#c43d3d", whiteSpace: "pre-wrap", font: "12px ui-monospace, monospace" } }, problem),
+  );
+}
+
 // ── module loader for the compiled (CommonJS) app ──
 const modules: Record<string, unknown> = {
   react: React,
   "react/jsx-runtime": jsxRuntime,
   "react-dom": ReactDOM,
   "react-dom/client": ReactDOMClient,
-  board: { board, useBoardState, useAction, useChannel, useTool, useTools, default: board },
+  board: { board, useBoardState, useAction, useChannel, useTool, useTools, CodeEditor, default: board },
 };
 
 (window as any).__wbRun = (factory: (require: (n: string) => unknown, module: any, exports: any) => void) => {

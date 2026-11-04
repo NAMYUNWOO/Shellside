@@ -9,6 +9,7 @@ import { CATALOG_DOC, LINK_DIRECTIONS, SECTION_COLORS, TOOL_KINDS, describeValue
 import { Board, BoardError } from "./board.ts";
 import { loadSource } from "./apps.ts";
 import { copyIntoWorkspace, describeFile } from "./files.ts";
+import { describeRoot } from "./code.ts";
 import type { Library } from "./library.ts";
 import type { BoardBrowsers } from "./browser.ts";
 
@@ -49,7 +50,9 @@ function summarize(t: Tool) {
               ? { url: s.url, pageTitle: s.title, control: s.control, tabs: s.tabs?.length ?? 0 }
               : t.kind === "file"
                 ? { fileName: t.props.fileName, path: t.props.path, size: t.props.size, mime: t.props.mime }
-                : { chars: s.text?.length ?? 0 };
+                : t.kind === "code"
+                  ? { root: t.props.root, single: t.props.single, open: s.open, active: s.active }
+                  : { chars: s.text?.length ?? 0 };
   return { id: t.id, name: t.name, title: t.title, kind: t.kind, description: t.description, version: t.version, agentAccess: t.agentAccess, updatedBy: t.updatedBy, ...counts };
 }
 
@@ -269,6 +272,27 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
       }),
   );
 
+  server.registerTool(
+    "code_open",
+    {
+      description:
+        "Open a code editor (Monaco) on the board for a folder, a project or one file, so the person can read and edit the code you are working on. " +
+        "You keep editing the files with your own tools; the editor picks your changes up. Show a file by setting the tool's state (open, active).",
+      inputSchema: {
+        path: z.string().describe("A folder or a file: absolute, or relative to the board's workspace"),
+        title: z.string().optional(),
+        open: z.array(z.string()).optional().describe("Files to open in tabs, relative to the folder"),
+      },
+    },
+    async ({ path, title, open }) =>
+      run(async () => {
+        const props = await describeRoot(isAbsolute(path) ? path : join(ctx.workspace, path));
+        const tabs = props.single ? [""] : (open ?? []).slice(0, 30);
+        const name = props.root.split(/[\\/]/).filter(Boolean).pop() || props.root;
+        return summarize(board.createTool("agent", { kind: "code", title: title || name, props, state: { open: tabs, active: tabs.at(-1) ?? "" } }, { fileOk: true }));
+      }),
+  );
+
   // ── sections: named areas that group tools ────────────────────────────────
   const sectionColor = z.enum(SECTION_COLORS);
   server.registerTool(
@@ -335,7 +359,8 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         "Create a free-form app on the board from React code (see board_catalog, kind \"app\", for the rules). " +
         "Prefer sourcePath: write the component to a .jsx/.tsx file in the workspace first, so you can edit it and call app_update. " +
         "Syntax errors and disallowed imports come back immediately. Afterwards call app_logs / app_snapshot to confirm it rendered. " +
-        "Apps that need each other's data connect through channels (useChannel) or read other tools (useTool): see board_catalog.",
+        "Apps that need each other's data connect through channels (useChannel) or read other tools (useTool): see board_catalog. " +
+        "For code or text editing inside an app, use CodeEditor from \"board\" (Monaco).",
       inputSchema: {
         title: z.string().min(1).max(120),
         name: toolName.optional(),

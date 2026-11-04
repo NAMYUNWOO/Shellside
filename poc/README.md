@@ -138,14 +138,15 @@ certificate):
 | --- | --- |
 | Left: **Work boards** list | Create boards, rename (double-click), delete (right-click). Each board shows its Claude state (idle, working, needs permission), its tool count and whether it is awaiting a reply. Collapse with `«` |
 | Center: **Canvas** | Tools sit on it as frames, each with a name (`@note1`, shown on its label). It works like Figma: Move tool (V) = an arrow; click a frame to select it, drag its name label or its edge to move it, drag on empty space to select several (box), Shift+click to add. Hand tool (H), or hold Space, = drag anywhere to pan. Link tool (L): drag from one frame to another (or click one, then the other) to link them; right-click a link to set its direction (none, A → B, B → A, both ways) or delete it, or select it and press Delete. Scroll / two-finger scroll = pan (a scroll that starts over a browser page scrolls the page), ⌘/Ctrl+scroll or pinch = zoom at the pointer, middle-button drag = pan. Drag the right edge = width (a browser frame: its sides and bottom corners); double-click the name = rename |
-| **Right-click menu** | Send to Claude… · Zoom to selection · Rename · Save to library… · Copy name · Copy ID · Copy · Duplicate · Agent access · Delete, each with its shortcut. Right-click empty space = + Note / + Checklist / + Browser here, Paste here |
-| **Files** | Drop files from your computer on the canvas: each becomes a file frame where it lands (several go side by side). The file is kept in the board's workspace (`files/`), where Claude reads it at its path; the frame shows its name, size and path, a preview (images, the start of text, CSV, JSON, code), Open, Show in folder (desktop app) and Copy path, and a note that Claude reads too. Any size: the desktop app copies the file from where it is (on macOS a clone: instant, no extra space); a browser streams it, with progress, after checking the disk has room. Folders aren't taken yet. Like any frame it has an @name, links, sections, undo, and goes to Claude with its path |
+| **Right-click menu** | Send to Claude… · Zoom to selection · Rename · Save to library… · Copy name · Copy ID · Copy · Duplicate · Agent access · Delete, each with its shortcut. Right-click empty space = + Note / + Checklist / + Browser / + Code editor here, Paste here |
+| **Files** | Drop files from your computer on the canvas: each becomes a file frame where it lands (several go side by side). The file is kept in the board's workspace (`files/`), where Claude reads it at its path; the frame shows its name, size and path, a preview (images, the start of text, CSV, JSON, code), Open, Show in folder (desktop app) and Copy path, and a note that Claude reads too. Any size: the desktop app copies the file from where it is (on macOS a clone: instant, no extra space); a browser streams it, with progress, after checking the disk has room. A text file's Edit opens it in a code editor. A folder dropped in the desktop app opens in a code editor. Like any frame it has an @name, links, sections, undo, and goes to Claude with its path |
+| **Code editor** | Monaco (VS Code's editor) on a folder, a project or one file of this computer: + → Code editor, or E, then a path (the board's work folder is filled in; the desktop app has a Browse button). A folder shows its files on the left (one level at a time) and opens them in tabs; + makes a new file. ⌘/Ctrl+S saves. You and Claude edit the same files: when Claude changes an open file the editor shows the new version, and if you have unsaved changes there it asks which to keep (a save never silently overwrites a newer file). The editor reaches nothing outside its folder (no `..`, no symlinks out), opens text files up to 5 MB, and works for the paired browser only. Its open tabs are in its state, so Claude sees what you are looking at and can open a file for you (`code_open`). Drag its sides and bottom corners to resize it |
 | **Sections** | Named, coloured areas that group frames, as in Figma. Shift+S draws one (or puts the selected frames in one). A frame belongs to the section its top part is in, so dragging a frame in or out moves it in or out. Drag a section's name to move it with what is in it; its grips resize it (what is in it stays). Double-click the name to rename it; the properties panel picks its colour. Delete removes it with what is in it (⌘/Ctrl+Z brings it back); ⇧⌘G / Ctrl+Shift+G removes just the section. Send a section to Claude, or write `@section1` |
 | **Zoom menu** (the % at the top) | Zoom in / out, to fit, to the selection, 50 / 100 / 200 %, minimap, properties panel, keyboard shortcuts |
 | Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Shellside mark (a nautilus shell) inside the button while Claude runs in this board's terminal, and `!` when a permission prompt is waiting |
 | Bottom: **Input box** | Sends straight to Claude, with the selected components attached as context. `@` suggests components by name; the ones you name are attached too |
-| **Library** | Saved components. Click one or drag it onto the canvas to reuse it |
+| **Library** | The built-in components (note, checklist, table, form, browser, code editor, file, section; they can't be removed) and saved ones. Click one or drag it onto the canvas. The **+** in the toolbar adds the built-in ones too |
 
 ## Keyboard shortcuts
 
@@ -154,7 +155,7 @@ method on too.
 
 | | |
 | --- | --- |
-| Tools | V move · H hand · Space (held) pan · L link · N note · C checklist · B browser (N and C put it under the pointer) |
+| Tools | V move · H hand · Space (held) pan · L link · N note · C checklist · B browser · E code editor (N, C and E put it under the pointer) |
 | View | ⌘/Ctrl + = / − zoom · ⇧0 100% · ⇧1 fit all · ⇧2 fit the selection · ⌘/Ctrl+\ properties panel |
 | Edit | ⌘/Ctrl+Z undo · ⇧⌘Z / Ctrl+Y redo · ⌘/Ctrl+C, X, V copy, cut, paste (frames; the clipboard gets their @names) · ⌘/Ctrl+D duplicate · arrows move 1 (⇧ 10) · Delete · ⌘/Ctrl+A select all · Esc deselect |
 | Frames | Enter = edit the selected frame (its first field) · Esc = stop editing and select it · double-click the name = rename |
@@ -163,9 +164,9 @@ method on too.
 
 Undo covers what you do on the canvas (move, resize, add, duplicate, paste, delete, rename; sections too), not the
 agent's edits.
-Delete takes effect at once, as in Figma, and ⌘/Ctrl+Z brings the frames back with their names, content and links
-(with new ids). In the desktop app, the Edit menu's Undo, Redo and Select All act on the board the same way, and
-⌘/Ctrl + = − 0 zoom the board, not the window.
+Delete takes effect at once, as in Figma, and ⌘/Ctrl+Z brings the frames back with their ids, names, content and
+links. In the desktop app, the Edit menu's Undo, Redo and Select All act on the board the same way (in a
+code editor, on its text), and ⌘/Ctrl + = − 0 zoom the board, not the window. Keys typed in a code editor stay there.
 
 ## Language
 
@@ -215,13 +216,17 @@ what is on screen. There is no Edit or Save button.
 `browser_open` `browser_snapshot` `browser_act` `browser_screenshot` `browser_network` `browser_network_body` `browser_handoff`
 `link_create` `link_update` `link_delete`
 `section_create` `section_update` `section_delete`
-`file_add`
+`file_add` `code_open`
 
 - Files: a file tool's `props.path` is where the file is (`board_list` and `tool_read` show it); the agent reads it
   with its own tools. `file_add` puts a file on the board: one in the workspace stays where it is, one elsewhere is
   copied into `files/`. A file tool's details can't be changed, and only the drop routes and `file_add` make one; its
   content is served to the paired browser only, and anything that could run (HTML, SVG, scripts) downloads instead of
   opening. The desktop app opens only files inside the board folders, and never one that runs a program.
+- Code editors: `code_open` opens one on a folder or file (absolute, or relative to the workspace), optionally with
+  files in tabs; `board_list` and `tool_read` show its `root` and the file it shows. The agent edits the files with its
+  own tools, and the editor picks the changes up. Its state (`open`, `active`) can be written to show a file. Its
+  root can't be changed, `tool_create` doesn't make one, and only the person's browser reads or saves through it.
 - Sections: `board_list` lists them with the tools in them, `tool_read` says which section a tool is in.
   `section_create` draws one around given tools (or at x, y, w, h); `section_update` renames, recolours, moves (the
   tools in it go along) or resizes it; `section_delete` removes it and leaves its tools. Only the person deletes a
@@ -244,6 +249,7 @@ Apps on the same board exchange data with each other in real time, without Claud
 | **Channels** | `const [v, setV] = useChannel("sales", initial)` · `board.channel("sales").get/set/subscribe` | Named shared values within a board. Any app can read, write and watch them. When one app writes, other apps see it immediately (in the same tab, without waiting for the server). JSON, 1 MB per channel, saved with the board |
 | **Read other tools** | `useTool(id)` · `useTools()` | Reads the state of tables, checklists, forms, notes and other apps in real time. `useTools()` returns the board's tool list, so you can build UI such as a data source picker |
 | **Write other tools** | `await board.writeTool(id, jsonPatch)` | Changes another tool's state with a JSON Patch. App code is written by the agent, so this **counts as an agent write** (read-only settings and approval gates still apply) |
+| **Code editor** | `<CodeEditor value={code} onChange={setCode} language="sql" onSave={…} />` | Monaco as a building block, for apps where the person writes or edits code or text (a SQL scratchpad, a config editor, a prompt editor). Props: `value`/`defaultValue`, `onChange`, `onSave` (⌘/Ctrl+S), `language` (colors for ~80 languages), `height`, `readOnly`, `theme`, `lineNumbers`, `minimap`, `wordWrap`, `fontSize`, `options`, `onMount(editor, monaco)`. Loaded from the board (`/sandbox/monaco.js`, with its CSS and icon font inside) only when an app shows one. The app sandbox has no web workers, so there is no type checking, and no file access: keep the text in state |
 
 - Tabular data uses one common shape, `{ columns: [{ key, label, type? }], rows: [{ id, ... }] }` (the same as the table tool), so apps built separately connect directly.
 - Claude: `channel_list` `channel_read` `channel_write` `channel_delete` (MCP), `wb ch ls|get|set|rm` (CLI). When Claude writes to a channel, apps update immediately.
@@ -356,19 +362,23 @@ server/boards.ts     Board list, per-board runtime (board data + shell + browser
 server/board.ts      Board data: tools, approval requests, events, JSON Patch, approval gates, frame placement
 server/library.ts    Component library (shared by all boards)
 server/agent.ts      Claude sign-in check, hook → state, composing the request text
-server/apps.ts       App compilation (sucrase), sandbox runtime build (esbuild)
+server/apps.ts       App compilation (sucrase), sandbox runtime and Monaco-for-apps builds (esbuild)
+server/files.ts      File tools: names, disk space, streaming and copying into the workspace, safe headers
+server/code.ts       Code editors: list, read, save under the editor's folder (no way out), save conflicts
 server/mcp.ts        Board MCP (per board, stateless Streamable HTTP)
 server/pty.ts        Shell sessions (node-pty), output replay on reconnect, foreground process
 server/workspace.ts  Working folder setup (.mcp.json, CLAUDE.md, settings + hooks)
 server/cdp.ts        Finds and starts the one headless Chrome; DevTools protocol over a pipe
 server/browser.ts    Board browsers: tabs, screencast to the board, the person's input, the agent's snapshot/act/handoff
 server/browser-inpage.js  Runs in each page (isolated world): page → text with @refs, finding and preparing elements
-sandbox/runtime.tsx  React + board bridge inside the app iframe (useBoardState, useChannel, useTool …)
+sandbox/runtime.tsx  React + board bridge inside the app iframe (useBoardState, useChannel, useTool, CodeEditor …)
+sandbox/monaco.ts    Monaco for apps' CodeEditor (bundled by server/apps.ts with Monaco's editor features)
 web/live.ts          Store for the board's channel and tool values, shared by app frames (instant app → app delivery, server sync)
 web/main.tsx         App shell: board list, active board, per-board terminal windows
 web/Canvas.tsx       React Flow canvas (frames, selection box, right-click, drop)
 web/BoardPanel.tsx   Board view: header, menus, dialogs, library, input box
 web/BrowserView.tsx  A browser frame: live page, address bar, tabs, take over, dropdown/dialog/file overlays
+web/CodeTool.tsx     A code editor frame: Monaco (web/monaco.ts, loaded when one shows), file tree, tabs, save, disk changes
 web/TerminalPane.tsx The only file that knows about wterm (the point to swap or fork it)
 bin/wb, wb.cmd, wb.mjs  The wb CLI (sh and cmd wrappers around wb.mjs)
 test/terminal-check.mjs End-to-end check of a board terminal on this OS, with a fake claude (CI runs it on all three)
@@ -399,8 +409,9 @@ Data from the single-board days (`data/board.json`, `workspace/`) is moved into 
 | ws | MIT | WebSockets (terminal, live board, board browser) |
 | zod | MIT | Checking tool input |
 | fast-json-patch | MIT | State patches |
+| Monaco Editor (`monaco-editor`) | MIT | Code editors on the board, and apps' `CodeEditor` |
 
-- **Full list:** `npm run build` writes `dist/third-party-licenses.md`. It lists every package bundled into the board UI with its license text, including the ones that come in through React Flow: d3 modules (ISC; d3-ease BSD-3-Clause) and zustand (MIT). The server serves it at `/third-party-licenses.md`, and the boards panel links to it ("Open source licenses"). The app sandbox runtime keeps React's own license headers.
+- **Full list:** `npm run build` writes `dist/third-party-licenses.md`. It lists every package bundled into the board UI with its license text, including the ones that come in through React Flow: d3 modules (ISC; d3-ease BSD-3-Clause) and zustand (MIT). The server serves it at `/third-party-licenses.md`, and the boards panel links to it ("Open source licenses"). The app sandbox runtime keeps React's own license headers. Monaco includes code from other projects; the list ends with its `ThirdPartyNotices.txt`, and `sandbox/dist/monaco.js` keeps their license comments.
 - **Not bundled:** the board browser drives the Chrome installed on the machine. Its design follows [ego-lite](https://github.com/citrolabs/ego-lite) (MIT), but no code was copied from it.
 - **Desktop app:** Electron (MIT) with Chromium; the app ships Electron's `LICENSE` and `LICENSES.chromium.html`, the
   board UI's list above, and `server/third-party-licenses.md` for the packages bundled into its server (the MCP SDK and

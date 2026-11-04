@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { BoardError } from "./board.ts";
 import { handleMcp } from "./mcp.ts";
-import { compileApp, ensureRuntime, loadSource, RUNTIME_OUT } from "./apps.ts";
+import { compileApp, ensureMonaco, ensureRuntime, loadSource, MONACO_OUT, RUNTIME_OUT } from "./apps.ts";
 import { claudeAuth, composeRequest, isClaude, isShell, programName, requestTools } from "./agent.ts";
 import { Library } from "./library.ts";
 import { BoardRegistry, type BoardRuntime } from "./boards.ts";
@@ -15,6 +15,7 @@ import { findChrome, noChromeMessage } from "./cdp.ts";
 import { startupNotes } from "./certs.ts";
 import { HumanSessions, sessionCookie } from "./auth.ts";
 import { contentHeaders, copyIntoWorkspace, describeFile, receiveFile } from "./files.ts";
+import { createEntry, describeRoot, listDir, readText, statFile, writeText } from "./code.ts";
 import { CATALOG_DOC, type Actor } from "../shared/catalog.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -38,6 +39,8 @@ const ALLOWED_ORIGINS = new Set([
 ]);
 
 ensureRuntime();
+// Monaco for apps' CodeEditor: built in the background (a checkout, first start); served once it is there.
+ensureMonaco().catch((err) => console.error(`[workboard] Monaco for apps did not build: ${(err as Error).message}`));
 const library = new Library(LIBRARY_FILE);
 // One headless Chrome (started on first use) behind every board's browser tools. Its profile lives in data/browser/.
 const browsers = new BrowserService(DATA_DIR);
@@ -311,6 +314,12 @@ const boardRoutes: BoardRoute[] = [
     "POST",
     /^\/tools$/,
     async ({ rt, body, actor }) => {
+      if (body?.kind === "code") {
+        // A code editor again (undo of a delete): the person's only, its root checked on the disk.
+        humanOnly(actor, "code editors");
+        const props = await describeRoot(String(body?.props?.root ?? ""));
+        return rt.board.createTool(actor, { ...body, props }, { fileOk: true });
+      }
       if (body?.kind !== "file") return rt.board.createTool(actor, body ?? {});
       // A file tool again (undo of a delete): the person's only, and its details come from the file itself.
       humanOnly(actor, "file tools");
@@ -318,6 +327,27 @@ const boardRoutes: BoardRoute[] = [
       return rt.board.createTool(actor, { ...body, props, title: body.title || props.fileName }, { fileOk: true });
     },
   ],
+  // Code editors: open one on a folder or a file (the person's choice of path), then list, read, save under its root.
+  [
+    "POST",
+    /^\/code-tools$/,
+    async ({ rt, body, actor }) => {
+      humanOnly(actor, "opening a code editor");
+      const props = await describeRoot(String(body?.path ?? ""));
+      const at = body?.at && Number.isFinite(body.at.x) && Number.isFinite(body.at.y) ? { at: { x: body.at.x + 450, y: body.at.y + 80 } } : {};
+      const title = props.root.split(/[\\/]/).filter(Boolean).pop() || props.root;
+      return rt.board.createTool(actor, { kind: "code", title, props, state: { open: props.single ? [""] : [], active: "" }, ...at }, { fileOk: true });
+    },
+  ],
+  ["GET", /^\/code\/([\w-]+)\/list$/, ({ rt, params, url, actor }) => codeOp(rt, actor, params[0], (r, one) => listDir(r, one, url.searchParams.get("dir") ?? ""))],
+  ["GET", /^\/code\/([\w-]+)\/file$/, ({ rt, params, url, actor }) => codeOp(rt, actor, params[0], (r, one) => readText(r, one, url.searchParams.get("path") ?? ""))],
+  ["GET", /^\/code\/([\w-]+)\/stat$/, ({ rt, params, url, actor }) => codeOp(rt, actor, params[0], (r, one) => statFile(r, one, url.searchParams.get("path") ?? ""))],
+  [
+    "PUT",
+    /^\/code\/([\w-]+)\/file$/,
+    ({ rt, params, url, body, actor }) => codeOp(rt, actor, params[0], (r, one) => writeText(r, one, url.searchParams.get("path") ?? "", body?.text, body?.baseMtime, body?.force === true)),
+  ],
+  ["POST", /^\/code\/([\w-]+)\/new$/, ({ rt, params, body, actor }) => codeOp(rt, actor, params[0], (r, one) => createEntry(r, one, String(body?.path ?? ""), body?.dir === true))],
   // The desktop app's drop: copy the file from where it is on this machine (the window knows its path).
   [
     "POST",
@@ -576,6 +606,15 @@ async function saveUpload(rt: BoardRuntime, req: IncomingMessage, url: URL, acto
   return meta;
 }
 
+// ── code editors ──────────────────────────────────────────────────────────────
+/** Run fn on a code tool's root, for the person (the agent edits files with its own tools). */
+function codeOp<T>(rt: BoardRuntime, actor: Actor, toolId: string, fn: (root: string, single: boolean) => Promise<T>) {
+  humanOnly(actor, "the code editor");
+  const t = rt.board.getTool(toolId);
+  if (t.kind !== "code") throw new BoardError("not a code editor", 400);
+  return fn(t.props.root, t.props.single === true);
+}
+
 // ── file tools ────────────────────────────────────────────────────────────────
 /** A file tool for a file now in the board's workspace. at: where the person dropped it (its top-left). */
 async function fileTool(rt: BoardRuntime, actor: Actor, path: string, at?: { x: number; y: number }) {
@@ -611,7 +650,7 @@ function serveLicenses(res: ServerResponse) {
 }
 
 // ── static files (production build) ─────────────────────────────────────────
-const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".wasm": "application/wasm", ".json": "application/json", ".ico": "image/x-icon" };
+const MIME: Record<string, string> = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".wasm": "application/wasm", ".json": "application/json", ".ico": "image/x-icon", ".ttf": "font/ttf", ".woff2": "font/woff2" };
 function serveStatic(url: URL, res: ServerResponse) {
   const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "");
   let file = resolve(DIST, rel || "index.html");
@@ -627,7 +666,8 @@ async function dispatch<C>(routes: [string, RegExp, (ctx: C) => unknown][], path
     const m = re.exec(path);
     if (!m || req.method !== method) continue;
     // A hook's input carries the whole tool result (a file Claude read, say): far more than any other request.
-    const body = method === "GET" || method === "DELETE" ? undefined : await readBody(req, path === "/agent/hook" ? 64 * 1024 * 1024 : undefined);
+    const big = path === "/agent/hook" ? 64 * 1024 * 1024 : /^\/code\/[\w-]+\/file$/.test(path) ? 12 * 1024 * 1024 : undefined;
+    const body = method === "GET" || method === "DELETE" ? undefined : await readBody(req, big);
     const result = await handler(make(m.slice(1), body));
     if (!res.headersSent && !res.writableEnded) send(res, 200, result);
     return true;
@@ -643,6 +683,25 @@ const server = createServer(async (req, res) => {
     if (!ALLOWED_HOSTS.has(host)) return send(res, 403, { error: "host not allowed" });
     res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "access-control-allow-origin": "*" });
     return res.end(readFileSync(RUNTIME_OUT));
+  }
+  // Monaco, for an app that shows a CodeEditor (a few MB: a browser keeps it, and asks again only if it changed).
+  if (req.method === "GET" && req.url?.split("?")[0] === "/sandbox/monaco.js") {
+    const host = (req.headers.host ?? "").replace(/:\d+$/, "");
+    if (!ALLOWED_HOSTS.has(host)) return send(res, 403, { error: "host not allowed" });
+    try {
+      await ensureMonaco();
+    } catch {
+      return send(res, 500, { error: "the code editor for apps did not build (see the server log)" });
+    }
+    const st = statSync(MONACO_OUT);
+    const etag = `"${st.size.toString(36)}-${Math.round(st.mtimeMs).toString(36)}"`;
+    const head = { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", etag, "access-control-allow-origin": "*" };
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, head);
+      return res.end();
+    }
+    res.writeHead(200, head);
+    return res.end(readFileSync(MONACO_OUT));
   }
   const denied = allowed(req);
   if (denied) return send(res, 403, { error: denied });

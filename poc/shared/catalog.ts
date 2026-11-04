@@ -101,6 +101,21 @@ export const fileProps = z.object({
 });
 export const fileState = z.object({ note: z.string().max(20000).default("") });
 
+// ── code: a code editor (Monaco) on a folder, a project or one file of this machine. Its root is fixed once made;
+// the person edits and saves there, the agent edits with its own tools and the editor picks the changes up.
+export const codeProps = z.object({
+  /** Absolute path: a folder, or one file. */
+  root: z.string().min(1).max(4000),
+  /** The root is one file (no file tree). */
+  single: z.boolean().default(false),
+});
+export const codeState = z.object({
+  /** Files open in tabs, relative to the root ("" = the root file itself). */
+  open: z.array(z.string().max(4000)).max(30).default([]),
+  /** The tab in front. */
+  active: z.string().max(4000).default(""),
+});
+
 export const KINDS = {
   checklist: { props: checklistProps, state: checklistState },
   form: { props: formProps, state: formState },
@@ -109,6 +124,7 @@ export const KINDS = {
   app: { props: appProps, state: appState },
   browser: { props: browserProps, state: browserState },
   file: { props: fileProps, state: fileState },
+  code: { props: codeProps, state: codeState },
 } as const;
 export type ToolKind = keyof typeof KINDS;
 export const TOOL_KINDS = Object.keys(KINDS) as ToolKind[];
@@ -125,11 +141,15 @@ export interface Layout {
   h?: number;
 }
 
-export const DEFAULT_WIDTH: Record<string, number> = { checklist: 380, form: 380, note: 380, table: 600, app: 520, browser: 960, file: 340 };
+export const DEFAULT_WIDTH: Record<string, number> = { checklist: 380, form: 380, note: 380, table: 600, app: 520, browser: 960, file: 340, code: 900 };
 /** A browser frame has a fixed height (the page scrolls inside it); other frames grow with their content. */
 export const BROWSER_HEIGHT = { default: 640, min: 260, max: 2000 };
 /** A browser frame's width: wider than other frames may be, so a page can have a full-HD layout. */
 export const BROWSER_WIDTH = { default: 960, min: 320, max: 2400 };
+export const CODE_HEIGHT = { default: 560, min: 220, max: 3000 };
+/** Frames with a set height (their content scrolls inside): browsers and code editors. */
+export const fixedHeight = (kind: string) => kind === "browser" || kind === "code";
+export const heightRange = (kind: string) => (kind === "code" ? CODE_HEIGHT : BROWSER_HEIGHT);
 /** Height of the address bar row above the page in a browser frame (px). */
 export const BROWSER_TOOLBAR = 40;
 /** The page in a browser frame is the frame less its 1 px border and the address bar. */
@@ -345,6 +365,8 @@ export function defaultState(kind: ToolKind): unknown {
       return { url: "about:blank", title: "", control: "shared", tabs: [], activeTab: 0 };
     case "file":
       return { note: "" };
+    case "code":
+      return { open: [], active: "" };
   }
 }
 
@@ -420,6 +442,18 @@ Rules for the source:
 - Files: const meta = await board.uploadFile(file)  → { path, relPath, name, size, type }; the file is saved
   in your workspace, so read it from \`path\`. Store meta in state so you can find it later.
 - Let yourself drive the app: useAction("reset", (args) => { ...; return result })  → app_invoke(toolId, "reset", args).
+- Code editing: CodeEditor is Monaco (VS Code's editor), for apps where the person writes or edits code or text
+  (a SQL scratchpad, a config editor, a snippet runner, a prompt editor…):
+    import { CodeEditor, useBoardState, board } from "board";
+    const [s, setS] = useBoardState();
+    <CodeEditor value={s.code ?? ""} onChange={(code) => setS((p) => ({ ...p, code }))} language="sql" height={280}
+                onSave={(code) => board.emit("saved", { code })} />
+  Props: value | defaultValue, onChange, onSave (⌘/Ctrl+S), language (colors for ~80: javascript, typescript, python,
+  json, sql, yaml, markdown, html, css, go, rust, java…; no type checking), height (default 300), readOnly, theme
+  ("light" | "dark" | "auto"), lineNumbers, minimap, wordWrap, fontSize, options (any Monaco option),
+  onMount(editor, monaco) for more (markers, decorations). Keep the text in state, as above, so you can read it.
+  Apps can't reach files: to edit a file through an app, put its text in state and write it back yourself when the
+  app emits; to simply let the person edit files or a folder, use code_open instead.
 
 Reading and controlling an app:
 - tool_read → its state (what the person entered).  tool_write → change state; the app re-renders at once.
@@ -456,6 +490,13 @@ The person drops files on the board; each becomes a file tool. The file is kept 
 read it with your own tools at props.path. To put a file you made on the board, call file_add (path) — not tool_create.
 props: { fileName, path, relPath?, size, mime }   (fixed)
 state: { note }   (a short note about the file, for the person and you; e.g. what it holds, or your summary)
+
+## kind: "code"  — a code editor (Monaco) on a folder, project or file
+The person opens one on a folder or a file of this machine (or you do, with code_open). They edit and save there;
+you edit the same files with your own tools, and the editor picks up your changes.
+props: { root, single }   (fixed: root is an absolute path; single = the root is one file)
+state: { open: [paths relative to root], active }   (the tabs; set them to show the person a file, e.g.
+  tool_write [{ "op": "replace", "path": "/active", "value": "src/app.ts" }, { "op": "add", "path": "/open/-", "value": "src/app.ts" }])
 
 ## kind: "browser"  — a real web browser on the board
 A Chrome tab shown live on the board. The person browses in it with mouse and keyboard; you read and drive the same

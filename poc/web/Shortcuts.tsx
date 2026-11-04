@@ -14,6 +14,7 @@ const groups = (t: T): { title: string; rows: [string, string[]][] }[] => [
       [t("New note at the pointer", "포인터 위치에 메모"), ["N"]],
       [t("New checklist at the pointer", "포인터 위치에 체크리스트"), ["C"]],
       [t("New browser", "새 브라우저"), ["B"]],
+      [t("Open a code editor", "코드 편집기 열기"), ["E"]],
       [t("Section: draw one, or put the selection in one", "섹션: 그리기, 또는 선택한 것을 섹션으로"), [kbd("shift+s")]],
     ],
   },

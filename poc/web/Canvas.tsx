@@ -31,7 +31,7 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { BROWSER_HEIGHT, BROWSER_WIDTH, frameAnchor, inSection, SECTION_MIN, sectionInside, type Layout, type Link, type LinkDirection, type Section, type SectionLayout, type Tool } from "../shared/catalog.ts";
+import { BROWSER_WIDTH, fixedHeight, frameAnchor, heightRange, inSection, SECTION_MIN, sectionInside, type Layout, type Link, type LinkDirection, type Section, type SectionLayout, type Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { ToolBody } from "./tools.tsx";
 import { kindLabel, useT } from "./i18n.tsx";
@@ -121,6 +121,8 @@ interface BoardCanvasProps {
   onSectionMenu: (e: { x: number; y: number }, sectionId: string) => void;
   /** Files dropped from the computer (board coordinates of the drop). */
   onDropFiles: (files: File[], at: { x: number; y: number }) => void;
+  /** Folders dropped on the board (each opens in a code editor). */
+  onDropFolders: (folders: File[], at: { x: number; y: number }) => void;
   /** Drawn with the section tool (board coordinates). */
   onDrawSection: (layout: SectionLayout) => void;
   /** A section was dragged (its contents went along) or resized: save it and keep it for undo. */
@@ -217,8 +219,8 @@ export function BoardCanvas(props: BoardCanvasProps) {
             type: "frame",
             position: p?.dragging || carried?.has(t.id) ? p!.position : { x: L.x, y: L.y },
             width: p?.resizing ? p.width : L.w,
-            // Height follows the content, except browsers: they keep a set height and the page scrolls inside.
-            height: p?.resizing ? p.height : t.kind === "browser" ? (L.h ?? BROWSER_HEIGHT.default) : undefined,
+            // Height follows the content, except browsers and code editors: they keep a set height and scroll inside.
+            height: p?.resizing ? p.height : fixedHeight(t.kind) ? (L.h ?? heightRange(t.kind).default) : undefined,
             selected: selectedSet.current.has(t.id),
             data: {
               tool: t,
@@ -445,13 +447,15 @@ export function BoardCanvas(props: BoardCanvasProps) {
           e.preventDefault();
           return props.onDropTemplate(id, flowPos(e));
         }
-        // Files from the computer become file tools where they land. Folders are left out (their entry says so).
+        // Files from the computer become file tools where they land; folders open in code editors (BoardPanel).
         const items = [...e.dataTransfer.items].filter((it) => it.kind === "file");
         if (!items.length) return;
         e.preventDefault();
-        const folders = items.filter((it) => it.webkitGetAsEntry?.()?.isDirectory).length;
-        const files = items.filter((it) => !it.webkitGetAsEntry?.()?.isDirectory).map((it) => it.getAsFile()).filter((f): f is File => !!f);
-        if (folders) onNotice(t("Folders can't go on the board yet: drop the files in them.", "폴더는 아직 올릴 수 없습니다. 폴더 안의 파일을 끌어다 놓으세요."));
+        const isDir = (it: DataTransferItem) => !!it.webkitGetAsEntry?.()?.isDirectory;
+        const asFiles = (list: DataTransferItem[]) => list.map((it) => it.getAsFile()).filter((f): f is File => !!f);
+        const folders = asFiles(items.filter(isDir));
+        const files = asFiles(items.filter((it) => !isDir(it)));
+        if (folders.length) props.onDropFolders(folders, flowPos(e));
         if (files.length) props.onDropFiles(files, flowPos(e));
       }}
       onMoveStart={(e) => e && onInteract()}
@@ -677,7 +681,7 @@ function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
   const [renaming, setRenaming] = useState(false);
   const resizeFrom = useRef<Partial<Layout>>({});
   const resizeStart = (_e: unknown, p: { x: number; y: number; width: number; height: number }) => {
-    resizeFrom.current = { x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.width), ...(tool.kind === "browser" ? { h: Math.round(p.height) } : {}) };
+    resizeFrom.current = { x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.width), ...(fixedHeight(tool.kind) ? { h: Math.round(p.height) } : {}) };
   };
   const resizeEnd = (l: Partial<Layout>) => {
     data.onLayout(tool.id, l);
@@ -685,7 +689,8 @@ function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
     data.onCommit([{ id: tool.id, before: resizeFrom.current, after }]);
   };
   const browser = tool.kind === "browser";
-  const cls = ["frame", browser && "browser-frame", selected && "selected", active && "active", waiting && "waiting", data.linking && "linking"].filter(Boolean).join(" ");
+  const sized = fixedHeight(tool.kind);
+  const cls = ["frame", browser && "browser-frame", tool.kind === "code" && "code-frame", selected && "selected", active && "active", waiting && "waiting", data.linking && "linking"].filter(Boolean).join(" ");
   return (
     <div className={cls} style={{ ["--z" as string]: zoom }}>
       {/* Where links attach. With the link tool it covers the frame, so a link starts or ends anywhere on it. */}
@@ -737,7 +742,7 @@ function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
           {Math.round(width)} × {Math.round(height ?? 0)}
         </div>
       ) : null}
-      {selected && !browser && (
+      {selected && !sized && (
         <NodeResizeControl
           variant={ResizeControlVariant.Line}
           position="right"
@@ -747,9 +752,9 @@ function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
           onResizeEnd={(_e, p) => resizeEnd({ x: p.x, y: p.y, w: p.width })}
         />
       )}
-      {/* A browser frame resizes from its sides and bottom corners, selected or not (selecting it by clicking the page
-          would also click the website). The page takes the frame's new size. */}
-      {browser &&
+      {/* A browser or code editor frame resizes from its sides and bottom corners, selected or not (selecting a browser
+          by clicking the page would also click the website). The content takes the frame's new size. */}
+      {sized &&
         BROWSER_GRIPS.map(([position, variant]) => (
           <NodeResizeControl
             key={position}
@@ -758,8 +763,8 @@ function FrameView({ data, selected, width, height }: NodeProps<FrameNode>) {
             autoScale={false} // the CSS keeps grips the same size on screen at any zoom
             minWidth={BROWSER_WIDTH.min}
             maxWidth={BROWSER_WIDTH.max}
-            minHeight={BROWSER_HEIGHT.min}
-            maxHeight={BROWSER_HEIGHT.max}
+            minHeight={heightRange(tool.kind).min}
+            maxHeight={heightRange(tool.kind).max}
             onResizeStart={resizeStart}
             onResizeEnd={(_e, p) => resizeEnd({ x: p.x, y: p.y, w: p.width, h: p.height })}
           />

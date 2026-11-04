@@ -6,15 +6,17 @@ export type MenuItem =
   | { label: string; onSelect: () => void; hint?: string; danger?: boolean; disabled?: boolean; strong?: boolean }
   | { separator: true };
 
-export function ContextMenu({ x, y, title, items, onClose }: { x: number; y: number; title?: string; items: MenuItem[]; onClose: () => void }) {
+/** above: (x, y) is the menu's bottom-left, for menus that open upward from a toolbar at the bottom. */
+export function ContextMenu({ x, y, title, items, onClose, above }: { x: number; y: number; title?: string; items: MenuItem[]; onClose: () => void; above?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
 
   useLayoutEffect(() => {
     const r = ref.current!.getBoundingClientRect();
-    setPos({ x: Math.max(8, Math.min(x, innerWidth - r.width - 8)), y: Math.max(8, Math.min(y, innerHeight - r.height - 8)) });
+    const top = above ? y - r.height : y;
+    setPos({ x: Math.max(8, Math.min(x, innerWidth - r.width - 8)), y: Math.max(8, Math.min(top, innerHeight - r.height - 8)) });
     ref.current!.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-  }, [x, y]);
+  }, [x, y, above]);
 
   useEffect(() => {
     const outside = (e: Event) => !ref.current?.contains(e.target as Node) && onClose();

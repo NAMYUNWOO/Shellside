@@ -31,6 +31,8 @@ import {
   type Section,
   type SectionColor,
   type SectionLayout,
+  fixedHeight,
+  heightRange,
   TOOL_NAME,
   type Tool,
   type ToolKind,
@@ -290,6 +292,7 @@ export class Board {
     if (!TOOL_KINDS.includes(input.kind)) throw new BoardError(`unknown kind "${input.kind}". Use one of: ${TOOL_KINDS.join(", ")}`);
     // A file tool points at a file on this machine: only the file routes make one (they check the file exists).
     if (input.kind === "file" && !opts.fileOk) throw new BoardError('a file tool is made by dropping a file on the board, or with file_add (path); not with tool_create');
+    if (input.kind === "code" && !opts.fileOk) throw new BoardError("a code editor is opened with code_open (path of a folder or file); not with tool_create");
     const v = validateTool(input.kind, input.props, input.state);
     if (!v.ok) throw new BoardError(v.error);
     const id = input.id && !this.tools.has(input.id) ? input.id : shortId(input.kind);
@@ -316,7 +319,7 @@ export class Board {
     // A person adding a tool drops it where they are looking; the agent's tools go to the next free spot.
     t.layout = at ? { x: Math.round(at.x - w / 2), y: Math.round(at.y - 80), w } : this.autoPlace(t.kind, w, estimateHeight(t));
     // A browser frame has a fixed height (the page scrolls inside it).
-    if (t.kind === "browser") t.layout.h = clampBrowserHeight(input.height ?? BROWSER_HEIGHT.default);
+    if (fixedHeight(t.kind)) t.layout.h = clampHeight(t.kind, input.height ?? heightRange(t.kind).default);
     this.tools.set(t.id, t);
     this.emit({ type: "tool", tool: t });
     this.log(actor, "tool_created", [`Created ${t.kind} "${t.title}"`, `"${t.title}" ${t.kind} 도구 생성`], { toolId: t.id });
@@ -332,7 +335,7 @@ export class Board {
     this.checkAccess(actor, t);
     this.checkVersion(t, input.baseVersion);
     if (actor === "agent" && input.agentAccess !== undefined) throw new BoardError("the agent cannot change its own access level", 403);
-    if (t.kind === "file" && input.props !== undefined) throw new BoardError("a file tool's details (path, size…) are fixed; add the file again instead", 400);
+    if ((t.kind === "file" || t.kind === "code") && input.props !== undefined) throw new BoardError(`a ${t.kind} tool's path is fixed; ${t.kind === "file" ? "add the file" : "open the folder"} again instead`, 400);
     const props = input.props !== undefined ? input.props : t.props;
     const v = validateTool(t.kind, props, t.state);
     if (!v.ok) throw new BoardError(v.error);
@@ -393,7 +396,7 @@ export class Board {
       w: clampWidth(num(input.w, cur.w), t.kind),
       ...(input.h !== undefined || cur.h !== undefined ? { h: Math.max(40, Math.min(20_000, num(input.h, cur.h ?? 300))) } : {}),
     };
-    if (t.kind === "browser") layout.h = clampBrowserHeight(layout.h ?? BROWSER_HEIGHT.default);
+    if (fixedHeight(t.kind)) layout.h = clampHeight(t.kind, layout.h ?? heightRange(t.kind).default);
     const next = { ...t, layout };
     this.tools.set(t.id, next);
     this.emit({ type: "tool", tool: next });
@@ -936,8 +939,11 @@ export class Board {
 }
 
 const clampWidth = (w: number, kind?: string) =>
-  kind === "browser" ? Math.max(BROWSER_WIDTH.min, Math.min(BROWSER_WIDTH.max, Math.round(w))) : Math.max(240, Math.min(1600, Math.round(w)));
-const clampBrowserHeight = (h: number) => Math.max(BROWSER_HEIGHT.min, Math.min(BROWSER_HEIGHT.max, Math.round(Number(h) || BROWSER_HEIGHT.default)));
+  kind === "browser" || kind === "code" ? Math.max(BROWSER_WIDTH.min, Math.min(BROWSER_WIDTH.max, Math.round(w))) : Math.max(240, Math.min(1600, Math.round(w)));
+const clampHeight = (kind: string, h: number) => {
+  const r = heightRange(kind);
+  return Math.max(r.min, Math.min(r.max, Math.round(Number(h) || r.default)));
+};
 
 /** Rough frame height before the board has measured it. */
 function estimateHeight(t: Tool): number {

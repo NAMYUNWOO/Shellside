@@ -101,6 +101,8 @@ export interface DesktopBridge {
   pathForFile(file: File): string;
   openPath(path: string): Promise<string>;
   showInFolder(path: string): Promise<void>;
+  /** The system's open dialog: a folder (or, on macOS, a file too). "" when cancelled. */
+  pickPath(opts: { files: boolean }): Promise<string>;
 }
 export const desktop = (globalThis as { shellside?: DesktopBridge }).shellside;
 
@@ -171,6 +173,19 @@ export function makeApi(boardId: string) {
       });
     },
     fileUrl: (toolId: string, head?: number) => b(`/file-tools/${toolId}/content${head ? `?head=${head}` : ""}`),
+    /** A code editor on a folder or a file of this machine. at: the frame's top-left. */
+    openCode: (path: string, at?: { x: number; y: number }) => call<Tool>("POST", b("/code-tools"), { path, at }),
+    code: (toolId: string) => {
+      const q = (k: string, v: string) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
+      const c = (sub: string) => b(`/code/${toolId}${sub}`);
+      return {
+        list: (dir: string) => call<{ entries: { name: string; dir: boolean; size: number }[]; truncated: boolean }>("GET", c(`/list?${q("dir", dir)}`)),
+        read: (path: string) => call<{ text: string; mtime: number; size: number }>("GET", c(`/file?${q("path", path)}`)),
+        stat: (path: string) => call<{ exists: boolean; mtime: number; size: number }>("GET", c(`/stat?${q("path", path)}`)),
+        write: (path: string, text: string, baseMtime?: number, force = false) => call<{ mtime: number }>("PUT", c(`/file?${q("path", path)}`), { text, baseMtime, force }),
+        create: (path: string, dir = false) => call<{ path: string }>("POST", c("/new"), { path, dir }),
+      };
+    },
     async upload(toolId: string, file: File) {
       const q = new URLSearchParams({ toolId, name: file.name, type: file.type });
       const res = await fetch(b(`/files?${q}`), { method: "POST", headers: { "content-type": "application/octet-stream", "x-wb-client": "web", "x-wb-lang": currentLang() }, body: file });

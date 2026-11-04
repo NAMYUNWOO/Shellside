@@ -1,6 +1,6 @@
 // Right panel, like Figma's design panel: the selected frame's properties, or layers + channels + history when nothing is selected.
 import { useEffect, useState } from "react";
-import { describeValue, SECTION_COLORS, type BoardEvent, type Channel, type Section, type SectionColor, type Tool } from "../shared/catalog.ts";
+import { describeValue, fixedHeight, SECTION_COLORS, type BoardEvent, type Channel, type Section, type SectionColor, type Tool } from "../shared/catalog.ts";
 import { useApi } from "./api.ts";
 import { actorLabel, ago, eventText, kindLabel, useI18n, useT } from "./i18n.tsx";
 
@@ -273,7 +273,7 @@ function ToolInspector({ tool, now, errors, onNotice, onSendToClaude, onSave, on
 
       {L && (
         <section className="insp-section insp-xyw">
-          {(tool.kind === "browser" ? (["x", "y", "w", "h"] as const) : (["x", "y", "w"] as const)).map((k) => (
+          {(fixedHeight(tool.kind) ? (["x", "y", "w", "h"] as const) : (["x", "y", "w"] as const)).map((k) => (
             <label key={k}>
               <span>{k.toUpperCase()}</span>
               <NumberField value={L[k] ?? 0} onCommit={(v) => api.setLayout(tool.id, { [k]: v }).catch(fail)} />
@@ -315,7 +315,7 @@ function ToolInspector({ tool, now, errors, onNotice, onSendToClaude, onSave, on
         <button className="primary wide" onClick={() => onSendToClaude([tool.id])}>
           {t("Send to Claude…", "Claude에게 보내기…")}
         </button>
-        {tool.kind !== "file" && (
+        {tool.kind !== "file" && tool.kind !== "code" && (
           <button className="wide" onClick={() => onSave(tool)}>
             {t("Save to library…", "라이브러리에 저장…")}
           </button>

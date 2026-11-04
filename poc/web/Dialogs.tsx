@@ -1,8 +1,9 @@
-// Modal dialogs: send a request to Claude about selected tools, and save a tool to the library.
+// Modal dialogs: send a request to Claude about selected tools, save a tool to the library, open a code editor.
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Section, Tool } from "../shared/catalog.ts";
-import { useApi, ApiError, type AgentStatus } from "./api.ts";
+import { api as globalApi, desktop, useApi, ApiError, type AgentStatus } from "./api.ts";
+import { IS_MAC } from "./keys.ts";
 import { kindLabel, useT, type T } from "./i18n.tsx";
 import { ShellsideMark } from "./ShellsideMark.tsx";
 
@@ -213,6 +214,88 @@ export function SaveToLibraryDialog({ tool, onClose, onNotice }: { tool: Tool; o
         </button>
         <button className="primary" disabled={!name.trim() || busy} onClick={save}>
           {t("Save", "저장")}
+        </button>
+      </footer>
+    </Modal>
+  );
+}
+
+/** Open a code editor on a folder (a project) or one file on this machine. The board's work folder is the default. */
+export function CodeOpenDialog({ boardId, at, onClose, onOpened, onNotice }: { boardId: string; at: { x: number; y: number }; onClose: () => void; onOpened: (tool: Tool) => void; onNotice: (m: string) => void }) {
+  const api = useApi();
+  const t = useT();
+  const [path, setPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    globalApi.listBoards().then(
+      (r) => setPath((p) => p || (r.boards.find((b) => b.id === boardId)?.workspace ?? "")),
+      () => {},
+    );
+  }, [boardId]);
+  const pick = async (files: boolean) => {
+    const chosen = await desktop?.pickPath({ files }).catch(() => "");
+    if (chosen) setPath(chosen);
+    input.current?.focus();
+  };
+  const open = async () => {
+    if (!path.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      onOpened(await api.openCode(path.trim(), at));
+      onClose();
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title={t("Open in a code editor", "코드 편집기로 열기")} onClose={onClose}>
+      <label className="field">
+        <span>{t("A folder (project) or a file on this computer", "이 컴퓨터의 폴더(프로젝트) 또는 파일")}</span>
+        <div className="path-row">
+          <input
+            ref={input}
+            autoFocus
+            spellCheck={false}
+            value={path}
+            placeholder={IS_MAC ? "/Users/me/project" : "C:\\Users\\me\\project"}
+            onChange={(e) => setPath(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && open()}
+          />
+          {desktop?.pickPath &&
+            (IS_MAC ? (
+              <button className="ghost" onClick={() => pick(true)}>
+                {t("Choose…", "선택…")}
+              </button>
+            ) : (
+              <>
+                <button className="ghost" onClick={() => pick(false)}>
+                  {t("Folder…", "폴더…")}
+                </button>
+                <button className="ghost" onClick={() => pick(true)}>
+                  {t("File…", "파일…")}
+                </button>
+              </>
+            ))}
+        </div>
+      </label>
+      <p className="muted small">
+        {t(
+          "The editor shows that folder and nothing outside it. You and Claude edit the same files: when Claude changes a file you have open, the editor shows the new version.",
+          "편집기는 그 폴더만 보여 주고 바깥은 열지 않습니다. 사용자와 Claude가 같은 파일을 고칩니다. 열어 둔 파일을 Claude가 바꾸면 편집기에 새 내용이 보입니다.",
+        )}
+      </p>
+      {error && <p className="error small">{error}</p>}
+      <footer className="modal-foot">
+        <span className="spacer" />
+        <button className="ghost" onClick={onClose}>
+          {t("Cancel", "취소")}
+        </button>
+        <button className="primary" disabled={!path.trim() || busy} onClick={open}>
+          {t("Open", "열기")}
         </button>
       </footer>
     </Modal>

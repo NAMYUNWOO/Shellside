@@ -1,7 +1,7 @@
 // App tools: agent-written React code. Compile on the server so the agent gets errors at once.
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { transform } from "sucrase";
 import { BoardError } from "./board.ts";
@@ -9,6 +9,8 @@ import { BoardError } from "./board.ts";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME_SRC = join(ROOT, "sandbox", "runtime.tsx");
 export const RUNTIME_OUT = join(ROOT, "sandbox", "dist", "runtime.js");
+const MONACO_SRC = join(ROOT, "sandbox", "monaco.ts");
+export const MONACO_OUT = join(ROOT, "sandbox", "dist", "monaco.js");
 
 const ALLOWED_IMPORTS = new Set(["react", "react/jsx-runtime", "react-dom", "react-dom/client", "board"]);
 
@@ -64,4 +66,57 @@ export function ensureRuntime() {
     logLevel: "warning",
   });
   console.log(`[workboard] built sandbox runtime → ${relative(ROOT, RUNTIME_OUT)}`);
+}
+
+let monacoBuild: Promise<void> | null = null;
+/** Bundle Monaco for apps (sandbox/dist/monaco.js, which an app's CodeEditor loads) when missing or older than its
+ *  source, the monaco-editor package or this file: one script, with its CSS and icon font inside (an app's sandbox loads no
+ *  stylesheets or font files). The desktop app ships it built. */
+export function ensureMonaco(): Promise<void> {
+  return (monacoBuild ??= buildMonaco().catch((err) => {
+    monacoBuild = null;
+    throw err;
+  }));
+}
+async function buildMonaco() {
+  const req = createRequire(import.meta.url);
+  if (!existsSync(MONACO_SRC)) return; // the desktop app: built already
+  const main = req.resolve("monaco-editor/editor/editor.main.js");
+  const pkg = resolve(dirname(main), "..", "..", "..", "package.json"); // esm/vs/editor/ → the package (its exports hide package.json)
+  const out = existsSync(MONACO_OUT) ? statSync(MONACO_OUT).mtimeMs : 0;
+  if ([MONACO_SRC, pkg, fileURLToPath(import.meta.url)].every((f) => statSync(f).mtimeMs <= out)) return; // and this build
+  const { build } = req("esbuild") as typeof import("esbuild");
+  // Monaco's own list of editor features, less the language services that need web workers (and the LSP client).
+  const features = readFileSync(main, "utf8")
+    .split("\n")
+    .filter((line) => !/languages\/features\/|__src_languages_features_|monaco-lsp-client|\bas lsp\b/.test(line))
+    .join("\n");
+  const result = await build({
+    stdin: { contents: `${features}\nimport ${JSON.stringify(MONACO_SRC.split(sep).join("/"))};\n`, resolveDir: dirname(main), sourcefile: "monaco-for-apps.js", loader: "js" },
+    bundle: true,
+    format: "iife",
+    minify: true,
+    target: "es2022",
+    write: false,
+    outdir: join(dirname(MONACO_OUT), ".monaco"),
+    loader: { ".ttf": "dataurl" },
+    plugins: [
+      {
+        // Monaco carries its own copy of DOMPurify, older than the fixed one: use the package (package.json pins it).
+        name: "dompurify",
+        setup(b) {
+          b.onResolve({ filter: /^\.\/dompurify\/dompurify\.js$/ }, (args) => b.resolve("dompurify", { kind: "import-statement", resolveDir: args.resolveDir }));
+        },
+      },
+    ],
+    logOverride: { "empty-import-meta": "silent" }, // worker URLs: apps have no workers (Monaco falls back to the page)
+    logLevel: "error",
+  });
+  const js = result.outputFiles.find((f) => f.path.endsWith(".js"))!.text;
+  const css = result.outputFiles.find((f) => f.path.endsWith(".css"))?.text ?? "";
+  const style = `(()=>{const s=document.createElement("style");s.textContent=${JSON.stringify(css)};document.head.appendChild(s)})();\n`;
+  mkdirSync(dirname(MONACO_OUT), { recursive: true });
+  writeFileSync(`${MONACO_OUT}.partial`, style + js);
+  renameSync(`${MONACO_OUT}.partial`, MONACO_OUT);
+  console.log(`[workboard] built Monaco for apps → ${relative(ROOT, MONACO_OUT)} (${(statSync(MONACO_OUT).size / 1e6).toFixed(1)} MB)`);
 }

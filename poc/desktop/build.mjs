@@ -23,6 +23,9 @@ cpSync(join(POC, "dist"), join(STAGE, "dist"), { recursive: true });
 // The sandbox runtime app iframes load. A checkout builds it on first start; the app ships it built.
 run(`npx tsx --eval "import('./server/apps.ts').then((m) => m.ensureRuntime())"`);
 cpSync(join(POC, "sandbox", "dist", "runtime.js"), join(STAGE, "sandbox", "dist", "runtime.js"));
+// Monaco for apps (their CodeEditor), built the same way.
+run(`npx tsx --eval "import('./server/apps.ts').then((m) => m.ensureMonaco())"`);
+cpSync(join(POC, "sandbox", "dist", "monaco.js"), join(STAGE, "sandbox", "dist", "monaco.js"));
 
 // The server, as one ES module. node-pty is native and stays a package; esbuild is only needed to rebuild the
 // runtime, which the app never does. CommonJS dependencies (ws) need `require`, which ES modules lack.

@@ -355,6 +355,15 @@ ipcMain.handle("shellside:show-in-folder", (e, path) => {
   const abs = boardFile(e, path);
   if (abs) shell.showItemInFolder(abs);
 });
+// A folder or file for a code editor, picked by the person in the system's dialog (macOS's takes either; Windows and
+// Linux pick one kind at a time).
+ipcMain.handle("shellside:pick-path", async (e, opts) => {
+  if (!serverUrl || new URL(e.senderFrame?.url ?? "about:blank").origin !== new URL(serverUrl).origin) return "";
+  const owner = BrowserWindow.fromWebContents(e.sender) ?? undefined;
+  const properties = process.platform === "darwin" ? ["openDirectory", "openFile", "createDirectory"] : [opts?.files ? "openFile" : "openDirectory"];
+  const r = await dialog.showOpenDialog(owner, { properties, title: T("Open in a code editor", "코드 편집기로 열기") });
+  return r.canceled ? "" : (r.filePaths[0] ?? "");
+});
 
 /** CI: the board loads, a terminal starts the shell, `wb` runs in it with the app's runtime. */
 async function smoke(file) {

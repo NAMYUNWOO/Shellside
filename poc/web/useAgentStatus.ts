@@ -5,6 +5,7 @@ import { api, type AgentStatus } from "./api.ts";
 export function useAgentStatus(boardId: string, intervalMs = 3_000) {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const refresh = useCallback((force = false) => {
+    if (!boardId) return; // the boards haven't loaded yet
     api.agentStatus(boardId, force).then(setStatus, () => {});
   }, [boardId]);
   useEffect(() => {
