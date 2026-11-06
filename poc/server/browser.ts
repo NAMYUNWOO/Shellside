@@ -1224,13 +1224,15 @@ export class BrowserTool {
 
   /** The agent's click, checked (#6): if the page got no mouse press at all, let go of any held button and click
    *  again; if it still gets none, click the element directly and say so. A click the page never got isn't "done". */
-  private async clickChecked(tab: Tab, t: string, x: number, y: number, count: number, nav: number): Promise<{ dialog?: boolean; note?: string }> {
+  private async clickChecked(tab: Tab, t: string, x: number, y: number, count: number, nav: number, before?: { down: number; click: number } | null): Promise<{ dialog?: boolean; note?: string }> {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const watch = await this.inpage(tab, "watchClick", t).catch(() => null);
+      // The first try compares with the counts point() just read (no extra round trip); a retry, or a target in a
+      // frame, sets up a watch. Chrome answers a mouse event once the page has handled it, so the counts are current.
+      const from = attempt === 0 && before ? before : null;
+      const watch = from ? null : await this.inpage(tab, "watchClick", t).catch(() => null);
       if ((await this.click(tab, x, y, count)) === "dialog") return { dialog: true };
-      if (watch == null || tab.navSeq !== nav) return {};
-      await sleep(30);
-      const seen = await this.inpage(tab, "clickSeen", watch).catch(() => null);
+      if ((!from && watch == null) || tab.navSeq !== nav) return {};
+      const seen = await (from ? this.inpage(tab, "inputSince", from) : this.inpage(tab, "clickSeen", watch)).catch(() => null);
       if (!seen || seen.down > 0 || tab.navSeq !== nav) return {}; // got it (or a new page came: it got it)
       // Logged so the next time can be looked into (the cause of #6 isn't known).
       console.warn(`[browser] the page got no mouse press for a click (attempt ${attempt + 1}): ${t} at ${x},${y}, viewport ${JSON.stringify(this.viewport)}, held ${[...this.held.buttons].join("+") || "nothing"}`);
@@ -1436,7 +1438,7 @@ export class BrowserTool {
       await pause();
       // Covered (a banner, another site's frame): the press goes to that, so there is nothing of the target's to check.
       const count = key === "click" ? 1 : 2;
-      const r: { dialog?: boolean; note?: string } = p.covered ? { dialog: (await this.click(tab, p.x, p.y, count)) === "dialog" } : await this.clickChecked(tab, t, p.x, p.y, count, nav);
+      const r: { dialog?: boolean; note?: string } = p.covered ? { dialog: (await this.click(tab, p.x, p.y, count)) === "dialog" } : await this.clickChecked(tab, t, p.x, p.y, count, nav, p.input);
       if (!r.dialog) await this.afterAction(tab, nav);
       const note = [p.covered ? `something covered it (${p.covered}); the click landed on that` : "", r.note ?? ""].filter(Boolean).join("; ");
       return { did: `${key === "click" ? "clicked" : "double-clicked"} ${p.what}`, ...(note ? { note } : {}) };

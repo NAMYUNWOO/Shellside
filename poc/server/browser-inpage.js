@@ -532,7 +532,10 @@
     const label = el.tagName === "INPUT" && el.labels ? [...el.labels] : [];
     // Fine when the point hits the element, something inside it, its label, or a parent that takes its clicks.
     const ok = !!hit && (hit === el || el.contains(hit) || hit.contains(el) || label.some((l) => l === hit || l.contains(hit)));
-    return { x: Math.round(x), y: Math.round(y), what, covered: ok ? null : describe(hit) };
+    // input: the press counts now, so the click step can tell afterwards whether the page got its click (#6). In a frame
+    // the counters are that frame's own; the step watches it separately then.
+    const input = el.ownerDocument === document ? { ...inputSeen } : null;
+    return { x: Math.round(x), y: Math.round(y), what, covered: ok ? null : describe(hit), input };
   }
 
   // Did the page get the mouse? (#6) A click step compares the trusted presses and clicks before and after, in this
@@ -565,6 +568,12 @@
     setTimeout(() => clickWatches.has(id) && (off(), clickWatches.delete(id)), 30000);
     return id;
   }
+  /** Presses and clicks since `from` (counts from point()); null if this is a new page (the click got through). */
+  function inputSince(from) {
+    if (inputSeen.down < from.down || inputSeen.click < from.click) return null;
+    return { down: inputSeen.down - from.down, click: inputSeen.click - from.click };
+  }
+
   /** What the watch saw; null when it is gone (a new page loaded: the click got through). */
   function clickSeen(id) {
     const w = clickWatches.get(id);
@@ -720,5 +729,5 @@
     return String(document.getSelection() || "");
   }
 
-  globalThis.__ss = { snapshot, resolve, point, watchClick, clickSeen, clickDirect, prepareFill, valueOf, choose, checkedOf, scrollTo, exists, selectAt, chooseIndex, cursorAt, selectedText, describe, scrollInfo };
+  globalThis.__ss = { snapshot, resolve, point, watchClick, clickSeen, inputSince, clickDirect, prepareFill, valueOf, choose, checkedOf, scrollTo, exists, selectAt, chooseIndex, cursorAt, selectedText, describe, scrollInfo };
 })();
