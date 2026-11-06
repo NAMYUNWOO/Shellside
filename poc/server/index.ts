@@ -116,6 +116,7 @@ const humanOnly = (actor: Actor, what: string) => {
 function sendToAgent(rt: BoardRuntime, prompt: string, toolIds: string[], lang: Lang, sectionIds: string[] = []) {
   if (!prompt?.trim()) throw new BoardError(L(lang, "Write what you want Claude to do.", "Claude에게 보낼 내용을 적어 주세요."));
   const { tools, links, sections } = requestTools(rt.board, prompt, toolIds, sectionIds);
+  rt.board.setFocus(tools.map((t) => t.id)); // Claude's new tools go next to what the request is about
   if (!rt.shell.running) throw new BoardError(L(lang, "This board's terminal hasn't started yet. Open the terminal once.", "이 보드의 터미널이 아직 시작되지 않았습니다. 터미널을 한 번 열어 주세요."), 409);
   const text = composeRequest(prompt, tools, links, sections);
   const fg = rt.shell.foreground();
@@ -362,6 +363,16 @@ const boardRoutes: BoardRoute[] = [
   ["PATCH", /^\/tools\/([\w-]+)\/layout$/, ({ rt, params, body }) => rt.board.setLayout(params[0], body ?? {})],
   ["POST", /^\/tools\/([\w-]+)\/patch$/, ({ rt, params, body, actor }) => rt.board.patchState(actor, params[0], body?.patch, body?.baseVersion)],
   ["POST", /^\/links$/, ({ rt, body, actor }) => rt.board.createLink(actor, body ?? {})],
+  // The frames the person has selected: Claude's new tools go next to them.
+  [
+    "PUT",
+    /^\/focus$/,
+    ({ rt, body, actor }) => {
+      humanOnly(actor, "the selection");
+      rt.board.setFocus(Array.isArray(body?.toolIds) ? body.toolIds.map(String).filter((id: string) => rt.board.listTools().some((t) => t.id === id)) : []);
+      return { ok: true };
+    },
+  ],
   // Sections: named areas that group tools.
   ["POST", /^\/sections$/, ({ rt, body, actor }) => rt.board.createSection(actor, body ?? {})],
   ["PATCH", /^\/sections\/([\w-]+)$/, ({ rt, params, body, actor }) => rt.board.updateSection(actor, params[0], body ?? {})],
@@ -467,7 +478,7 @@ const boardRoutes: BoardRoute[] = [
     /^\/apps$/,
     ({ rt, body, actor }) => {
       const src = loadSource(rt.meta.workspace, body ?? {});
-      return rt.board.createTool(actor, { kind: "app", title: body?.title ?? "App", description: body?.description, props: { ...src, height: body?.height }, state: body?.state ?? {}, width: body?.width });
+      return rt.board.createTool(actor, { kind: "app", title: body?.title ?? "App", description: body?.description, props: { ...src, height: body?.height }, state: body?.state ?? {}, width: body?.width, near: body?.near });
     },
   ],
   [

@@ -117,6 +117,9 @@ export class Board {
   private eventWaiters = new Set<() => void>();
   private saveTimer: NodeJS.Timeout | null = null;
   private appLogs = new Map<string, AppLog[]>();
+  /** Where the work is, for placing the agent's new tools next to it: the tools the person selected or sent a request
+   *  about, or the tool the agent last made or changed, whichever came last. Not saved. */
+  private focus: string[] = [];
 
   constructor(
     private file: string,
@@ -285,7 +288,21 @@ export class Board {
   // ── tool writes ────────────────────────────────────────────────────────────
   createTool(
     actor: Actor,
-    input: { title: string; name?: string; description?: string; kind: ToolKind; props?: unknown; state?: unknown; agentAccess?: "read" | "write"; id?: string; width?: number; height?: number; at?: { x: number; y: number } },
+    input: {
+      title: string;
+      name?: string;
+      description?: string;
+      kind: ToolKind;
+      props?: unknown;
+      state?: unknown;
+      agentAccess?: "read" | "write";
+      id?: string;
+      width?: number;
+      height?: number;
+      at?: { x: number; y: number };
+      /** A tool or section (id or name) to put it next to; without it, the agent's tools go next to the work (focus). */
+      near?: string;
+    },
     /** fileOk: made by the file routes (dropped, file_add) or brought back by undo, which checked the file. */
     opts: { fileOk?: boolean } = {},
   ): Tool {
@@ -316,11 +333,15 @@ export class Board {
     };
     const w = clampWidth(input.width ?? DEFAULT_WIDTH[t.kind] ?? 400, t.kind);
     const at = input.at && Number.isFinite(input.at.x) && Number.isFinite(input.at.y) ? input.at : null;
-    // A person adding a tool drops it where they are looking; the agent's tools go to the next free spot.
-    t.layout = at ? { x: Math.round(at.x - w / 2), y: Math.round(at.y - 80), w } : this.autoPlace(t.kind, w, estimateHeight(t));
+    // A person adding a tool drops it where they are looking; the agent's go next to what the work is about.
+    const near = !at && (actor === "agent" || input.near) ? this.anchorOf(input.near) : null;
+    const estH = fixedHeight(t.kind) ? clampHeight(t.kind, input.height ?? heightRange(t.kind).default) : estimateHeight(t);
+    t.layout = at ? { x: Math.round(at.x - w / 2), y: Math.round(at.y - 80), w } : ((near && this.placeNear(near, w, estH)) ?? this.autoPlace(t.kind, w, estH));
     // A browser frame has a fixed height (the page scrolls inside it).
     if (fixedHeight(t.kind)) t.layout.h = clampHeight(t.kind, input.height ?? heightRange(t.kind).default);
     this.tools.set(t.id, t);
+    if (near) this.growHome(near, t);
+    if (actor === "agent") this.focus = [t.id]; // the next one goes next to this one
     this.emit({ type: "tool", tool: t });
     this.log(actor, "tool_created", [`Created ${t.kind} "${t.title}"`, `"${t.title}" ${t.kind} 도구 생성`], { toolId: t.id });
     return t;
@@ -355,6 +376,7 @@ export class Board {
       updatedAt: now(),
     };
     this.tools.set(t.id, next);
+    if (actor === "agent") this.focus = [t.id];
     this.emit({ type: "tool", tool: next });
     this.log(actor, "tool_updated", [`Changed the setup of "${next.title}"`, `"${next.title}" 도구 구성 변경`], { toolId: t.id });
     return next;
@@ -404,6 +426,105 @@ export class Board {
   }
 
   /** Next free spot: right of the newest frame, wrapping to a new row past ROW_LIMIT, never overlapping. */
+  /** The person is working on these tools (selected them, or sent Claude a request about them). */
+  setFocus(toolIds: string[]) {
+    const ids = toolIds.map((id) => this.resolveToolId(id)).filter((id) => this.tools.get(id)?.layout);
+    if (ids.length) this.focus = ids.slice(0, 50);
+  }
+
+  /** What a new tool of the agent goes next to: the tool or section it names, else where the work is (focus). */
+  private anchorOf(near?: string): Layout[] | null {
+    if (near) {
+      const id = this.resolveToolId(near);
+      if (this.tools.get(id)?.layout) return [this.tools.get(id)!.layout!];
+      const sec = this.listSections().find((x) => x.id === near || x.name.toLowerCase() === near.replace(/^@/, "").toLowerCase());
+      if (!sec) throw new BoardError(`near: no tool or section "${near}"`, 404);
+      const inside = this.toolsIn(sec.id).map((t) => t.layout!);
+      // An empty section: its top-left corner, inside (the spot to the right of this point).
+      return inside.length ? inside : [{ x: sec.layout.x, y: sec.layout.y + 76, w: 0, h: 1 }];
+    }
+    const ids = this.focus.filter((id) => this.tools.get(id)?.layout);
+    return ids.length ? ids.map((id) => this.tools.get(id)!.layout!) : null;
+  }
+
+  /** The free spot nearest to these frames: to their right, else below, else left or above. It overlaps no frame, and
+   *  doesn't land in (or across) a section unless the frames are in it, so it doesn't join a section by accident. */
+  private placeNear(anchors: Layout[], w: number, h: number): Layout | null {
+    const GAP = 48;
+    const STEP = 40;
+    const frames = this.listTools().map((t) => ({ ...t.layout!, h: t.layout!.h ?? estimateHeight(t) }));
+    const height = (l: Layout) => frames.find((f) => f.x === l.x && f.y === l.y && f.w === l.w)?.h ?? l.h ?? 200;
+    const box = {
+      x: Math.min(...anchors.map((a) => a.x)),
+      y: Math.min(...anchors.map((a) => a.y)),
+      r: Math.max(...anchors.map((a) => a.x + a.w)),
+      b: Math.max(...anchors.map((a) => a.y + height(a))),
+    };
+    const homes = this.listSections().filter((sec) => anchors.some((a) => inSection(frameAnchor(a), sec.layout)));
+    const free = (x: number, y: number) => {
+      if (frames.some((f) => x < f.x + f.w + GAP / 2 && f.x < x + w + GAP / 2 && y < f.y + f.h + GAP / 2 && f.y < y + h + GAP / 2)) return false;
+      for (const sec of this.sections.values()) {
+        const L = sec.layout;
+        const touches = x < L.x + L.w && L.x < x + w && y < L.y + L.h && L.y - 36 < y + h; // 36: its name above it
+        if (!touches) continue;
+        const inside = x >= L.x && y >= L.y && x + w <= L.x + L.w && y + h <= L.y + L.h;
+        if (!inside || !homes.includes(sec)) return false;
+      }
+      return true;
+    };
+    // Candidates on lines through the anchors' edges, scored by distance; right of them first, then below.
+    const xs = new Set<number>();
+    const ys = new Set<number>();
+    for (let i = -40; i <= 60; i++) {
+      xs.add(box.r + GAP + i * STEP).add(box.x + i * STEP).add(box.x - w - GAP - i * STEP);
+      ys.add(box.y + i * STEP).add(box.b + GAP + i * STEP).add(box.y - h - GAP - i * STEP);
+    }
+    const spots: { x: number; y: number; score: number }[] = [];
+    for (const x of xs)
+      for (const y of ys) {
+        let score: number;
+        if (x >= box.r + GAP) score = x - box.r + Math.abs(y - box.y) * 0.6;
+        else if (y >= box.b + GAP) score = y - box.b + Math.abs(x - box.x) * 0.6 + 40;
+        else if (x + w + GAP <= box.x) score = box.x - x - w + Math.abs(y - box.y) * 0.6 + 400;
+        else if (y + h + GAP <= box.y) score = box.y - y - h + Math.abs(x - box.x) * 0.6 + 400;
+        else continue;
+        if (homes.length && !homes.some((sec) => inSection(frameAnchor({ x, y, w }), sec.layout))) score += 300; // stay in its section if there is room
+        spots.push({ x, y, score });
+      }
+    spots.sort((a, b) => a.score - b.score);
+    const spot = spots.find((p) => free(p.x, p.y));
+    return spot ? { x: Math.round(spot.x), y: Math.round(spot.y), w } : null;
+  }
+
+  /** A tool put next to work in a section, but outside it (there was no room): the section grows to take it in, when
+   *  that brings in no other tool and runs into no other section. */
+  private growHome(anchors: Layout[], t: Tool) {
+    const L = t.layout!;
+    const homes = this.listSections().filter((sec) => anchors.some((a) => inSection(frameAnchor(a), sec.layout)));
+    if (!homes.length) return;
+    const home = homes.reduce((a, b) => (a.layout.w * a.layout.h <= b.layout.w * b.layout.h ? a : b)); // the innermost
+    const S = home.layout;
+    if (inSection(frameAnchor(L), S)) return;
+    const PAD = 48;
+    const x0 = Math.min(S.x, L.x - PAD);
+    const y0 = Math.min(S.y, L.y - PAD - 28);
+    const x1 = Math.max(S.x + S.w, L.x + L.w + PAD);
+    const y1 = Math.max(S.y + S.h, L.y + (L.h ?? estimateHeight(t)) + PAD);
+    const grown = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    const members = new Set(this.toolsIn(home.id).map((x) => x.id));
+    if (this.listTools().some((o) => o.id !== t.id && !members.has(o.id) && o.layout && inSection(frameAnchor(o.layout), grown))) return;
+    for (const sec of this.sections.values()) {
+      if (sec.id === home.id || sectionInside(sec.layout, S)) continue; // sections inside it stay inside
+      const G = sec.layout;
+      if (sectionInside(S, G)) {
+        if (!sectionInside(grown, G)) return; // it would stick out of the section around it
+        continue;
+      }
+      if (grown.x < G.x + G.w && G.x < grown.x + grown.w && grown.y < G.y + G.h && G.y - 36 < grown.y + grown.h) return; // 36: a name above
+    }
+    this.setSectionLayout(home.id, grown);
+  }
+
   private autoPlace(kind: string, w: number, estH: number): Layout {
     const GAP = 48;
     const ROW_LIMIT = 1800;

@@ -1,7 +1,7 @@
 // One headless Chrome for the whole server, driven over the Chrome DevTools Protocol (CDP).
 // The connection is a pipe (--remote-debugging-pipe), not a TCP port: no other process or website can reach it.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { BoardError } from "./board.ts";
@@ -117,6 +117,26 @@ export function noChromeMessage(host = thisHost()): string {
   return `No Chrome, Chromium, Edge or Brave was found for the board browser. Install Google Chrome or run ${PLAYWRIGHT_INSTALL} (no restart needed), or set WB_CHROME to a Chromium-based browser's executable and restart the server.`;
 }
 
+/** No "Save password?" prompt in the board browser: headless, nobody can see it, and while it is up the page gets no
+ *  mouse input, so every click after a sign-in silently does nothing (#6). Set in the profile's preferences, keeping the
+ *  rest of them (a file that can't be read is left alone). */
+export function noPasswordPrompts(profileDir: string) {
+  const file = join(profileDir, "Default", "Preferences");
+  let prefs: any = {};
+  if (existsSync(file)) {
+    try {
+      prefs = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      return;
+    }
+  }
+  if (prefs.credentials_enable_service === false && prefs.profile?.password_manager_enabled === false) return;
+  prefs.credentials_enable_service = false;
+  prefs.profile = { ...prefs.profile, password_manager_enabled: false, password_manager_leak_detection: false };
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(prefs));
+}
+
 export class Chrome {
   private proc: ChildProcess | null = null;
   private seq = 0;
@@ -151,6 +171,7 @@ export class Chrome {
     // WB_BROWSER_CA: its own certificate database (certs.ts). Without it, Chrome runs with the server's environment.
     const env = browserEnv(dirname(this.profileDir));
     mkdirSync(this.profileDir, { recursive: true });
+    noPasswordPrompts(this.profileDir);
     const lang = Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
     const args = [
       "--headless",

@@ -127,6 +127,8 @@ export function makeApi(boardId: string) {
     deleteTool: (toolId: string) => call<{ ok: true }>("DELETE", b(`/tools/${toolId}`)),
     // links between tools
     createLink: (from: string, to: string, direction: LinkDirection = "none") => call<Link>("POST", b("/links"), { from, to, direction }),
+    /** The frames the person works on (selected): Claude's new tools go next to them. */
+    setFocus: (toolIds: string[]) => call<{ ok: true }>("PUT", b("/focus"), { toolIds }),
     createSection: (input: { id?: string; title?: string; name?: string; color?: SectionColor; around?: string[]; layout?: Partial<SectionLayout> }) => call<Section>("POST", b("/sections"), input),
     updateSection: (id: string, input: { title?: string; name?: string; color?: SectionColor }) => call<Section>("PATCH", b(`/sections/${id}`), input),
     setSectionLayout: (id: string, layout: Partial<SectionLayout>, moveContents = false) =>

@@ -35,6 +35,7 @@ If MCP is unavailable, the \`wb\` CLI does the same (\`wb help\`). Answer in the
 - A message that starts with "[WorkBoard]" is about tools the person selected on the board: read them first (\`tool_read\`, \`app_snapshot\` for apps), then change them or work from their contents.
 - When asked to make a tool, make it on the board; do not draw it in the terminal.
 - Keep the tools of one piece of work together in a section (\`section_create\` around them, titled for the work, e.g. "Research"). A request about a section (\`@name\`) means the tools in it.
+- New tools appear next to what the person's request or selection is about, or else next to the tool you last made or changed. To put one somewhere else, pass \`near\` (a tool or a section) when you create it.
 - For multi-step work, keep progress in a checklist. Check each step with \`tool_write\` as you finish it; on failure, put a one-line cause in the item's note.
 - Risky or hard-to-undo steps (deploys, deleting data, sending things out) get \`gate: "human"\` on their checklist item. Right before running one, ask with \`board_ask\` (kind "approval", toolId, itemId). If it is rejected or unanswered, do not proceed.
 - When you need several values from the person, do not ask one by one in the terminal: use \`board_ask\` (kind "input", fields) once.

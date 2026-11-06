@@ -5,6 +5,13 @@
 (() => {
   if (globalThis.__ss) return;
 
+  // Trusted presses and clicks this window got, counted from the start of the page, before any page script: a page
+  // that stops these events can't hide them from the click check (#6).
+  const inputSeen = { down: 0, click: 0 };
+  addEventListener("mousedown", (e) => e.isTrusted && inputSeen.down++, true);
+  addEventListener("pointerdown", (e) => e.isTrusted && inputSeen.down++, true);
+  addEventListener("click", (e) => e.isTrusted && inputSeen.click++, true);
+
   const refs = new Map(); // n → WeakRef(Element)
   const ids = new WeakMap(); // Element → n
   let next = 1;
@@ -528,6 +535,46 @@
     return { x: Math.round(x), y: Math.round(y), what, covered: ok ? null : describe(hit) };
   }
 
+  // Did the page get the mouse? (#6) A click step compares the trusted presses and clicks before and after, in this
+  // isolated world (the page can't see it), so a click Chrome never delivered isn't reported as done.
+  const clickWatches = new Map();
+  let clickWatchSeq = 0;
+  function watchClick(target) {
+    const el = resolve(target);
+    const win = el.ownerDocument.defaultView || window;
+    const id = ++clickWatchSeq;
+    if (win === window) {
+      // This page: the counters above saw everything since it started.
+      const from = { ...inputSeen };
+      clickWatches.set(id, { from });
+      return id;
+    }
+    // A same-site frame: watch its window now.
+    const seen = { down: 0, click: 0 };
+    const onDown = (e) => e.isTrusted && seen.down++;
+    const onClick = (e) => e.isTrusted && seen.click++;
+    win.addEventListener("pointerdown", onDown, true);
+    win.addEventListener("mousedown", onDown, true);
+    win.addEventListener("click", onClick, true);
+    const off = () => {
+      win.removeEventListener("pointerdown", onDown, true);
+      win.removeEventListener("mousedown", onDown, true);
+      win.removeEventListener("click", onClick, true);
+    };
+    clickWatches.set(id, { seen, off });
+    setTimeout(() => clickWatches.has(id) && (off(), clickWatches.delete(id)), 30000);
+    return id;
+  }
+  /** What the watch saw; null when it is gone (a new page loaded: the click got through). */
+  function clickSeen(id) {
+    const w = clickWatches.get(id);
+    if (!w) return null;
+    clickWatches.delete(id);
+    if (w.from) return { down: inputSeen.down - w.from.down, click: inputSeen.click - w.from.click };
+    w.off();
+    return w.seen;
+  }
+
   /** Click without the mouse (for controls with no size on screen, e.g. a styled checkbox). */
   function clickDirect(target) {
     const el = resolve(target);
@@ -673,5 +720,5 @@
     return String(document.getSelection() || "");
   }
 
-  globalThis.__ss = { snapshot, resolve, point, clickDirect, prepareFill, valueOf, choose, checkedOf, scrollTo, exists, selectAt, chooseIndex, cursorAt, selectedText, describe, scrollInfo };
+  globalThis.__ss = { snapshot, resolve, point, watchClick, clickSeen, clickDirect, prepareFill, valueOf, choose, checkedOf, scrollTo, exists, selectAt, chooseIndex, cursorAt, selectedText, describe, scrollInfo };
 })();

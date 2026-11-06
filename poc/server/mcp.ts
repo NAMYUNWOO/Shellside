@@ -24,6 +24,10 @@ export interface McpContext {
 /** What the agent sees of a tool: everything but the compiled bundle. */
 const forAgent = ({ compiled, ...t }: Tool) => t;
 const toolName = z.string().min(1).max(41).describe("Short name, unique on the board: letters, digits, _ . - (no spaces), e.g. research");
+const nearArg = z
+  .string()
+  .optional()
+  .describe("A tool or section (id or @name) to put it next to. Default: next to what the person's request or selection is about, or what you last worked on");
 const linkDirection = z
   .enum(LINK_DIRECTIONS as [string, ...string[]])
   .describe('"none": the tools belong together; "forward": from → to (take from the first, act on the second); "both": each way');
@@ -168,6 +172,7 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         props: z.record(z.string(), z.any()).optional(),
         state: z.record(z.string(), z.any()).optional(),
         width: z.number().int().min(240).max(1600).optional().describe("Frame width in px on the board canvas"),
+        near: nearArg,
       },
     },
     async (args) => run(() => forAgent(board.createTool("agent", args as any))),
@@ -204,6 +209,7 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
     async ({ toolId, patch, baseVersion }) =>
       run(() => {
         const t = board.patchState("agent", toolId, patch, baseVersion);
+        board.setFocus([t.id]); // Claude is working on it: its next new tool goes next to it
         return { ok: true, id: t.id, version: t.version, state: t.state };
       }),
   );
@@ -261,14 +267,15 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         path: z.string().describe("Absolute, or relative to the board's workspace"),
         title: z.string().optional().describe("Default: the file's name"),
         note: z.string().optional().describe("A line about it, shown under the file"),
+        near: nearArg,
       },
     },
-    async ({ path, title, note }) =>
+    async ({ path, title, note, near }) =>
       run(async () => {
         const abs = isAbsolute(path) ? path : join(ctx.workspace, path);
         const here = await describeFile(ctx.workspace, abs);
         const props = here.relPath ? here : await describeFile(ctx.workspace, await copyIntoWorkspace(ctx.workspace, abs));
-        return summarize(board.createTool("agent", { kind: "file", title: title || props.fileName, props, state: { note: note ?? "" } }, { fileOk: true }));
+        return summarize(board.createTool("agent", { kind: "file", title: title || props.fileName, props, state: { note: note ?? "" }, near }, { fileOk: true }));
       }),
   );
 
@@ -282,14 +289,15 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         path: z.string().describe("A folder or a file: absolute, or relative to the board's workspace"),
         title: z.string().optional(),
         open: z.array(z.string()).optional().describe("Files to open in tabs, relative to the folder"),
+        near: nearArg,
       },
     },
-    async ({ path, title, open }) =>
+    async ({ path, title, open, near }) =>
       run(async () => {
         const props = await describeRoot(isAbsolute(path) ? path : join(ctx.workspace, path));
         const tabs = props.single ? [""] : (open ?? []).slice(0, 30);
         const name = props.root.split(/[\\/]/).filter(Boolean).pop() || props.root;
-        return summarize(board.createTool("agent", { kind: "code", title: title || name, props, state: { open: tabs, active: tabs.at(-1) ?? "" } }, { fileOk: true }));
+        return summarize(board.createTool("agent", { kind: "code", title: title || name, props, state: { open: tabs, active: tabs.at(-1) ?? "" }, near }, { fileOk: true }));
       }),
   );
 
@@ -370,12 +378,13 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         state: z.record(z.string(), z.any()).optional().describe("Initial board state for the app"),
         height: z.number().int().min(60).max(1600).optional(),
         width: z.number().int().min(240).max(1600).optional().describe("Frame width in px on the board canvas (default 520)"),
+        near: nearArg,
       },
     },
-    async ({ title, name, description, source, sourcePath, state, height, width }) =>
+    async ({ title, name, description, source, sourcePath, state, height, width, near }) =>
       run(() => {
         const src = loadSource(ctx.workspace, { source, sourcePath });
-        const t = board.createTool("agent", { kind: "app", title, name, description, props: { ...src, height }, state: state ?? {}, width });
+        const t = board.createTool("agent", { kind: "app", title, name, description, props: { ...src, height }, state: state ?? {}, width, near });
         return { ...forAgent(t), props: { sourcePath: t.props.sourcePath, height: t.props.height, sourceChars: t.props.source.length } };
       }),
   );
@@ -508,11 +517,12 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         width: z.number().int().min(320).max(2400).optional().describe("Frame width (default 960). The page is the frame less 2 px wide and 42 px tall (border, address bar)"),
         height: z.number().int().min(260).max(2000).optional().describe("Frame height (default 640)"),
         snapshot: z.boolean().optional().describe("Return a page snapshot (default true)"),
+        near: nearArg,
       },
     },
-    async ({ url, toolId, title, name, width, height, snapshot }) => {
+    async ({ url, toolId, title, name, width, height, snapshot, near }) => {
       try {
-        const bt = await ctx.browsers.open("agent", { url, toolId, title, name, width, height });
+        const bt = await ctx.browsers.open("agent", { url, toolId, title, name, width, height, near });
         if (snapshot === false) return replyText(JSON.stringify({ toolId: bt.toolId, url: bt.tab?.url, title: bt.tab?.title }));
         const snap = await bt.snapshot("agent", { maxChars: 12000 });
         return replyText(`toolId: ${bt.toolId}`, snap.text);
@@ -675,12 +685,13 @@ export function createBoardMcp(board: Board, ctx: McpContext) {
         templateId: z.string(),
         title: z.string().max(120).optional(),
         state: z.record(z.string(), z.any()).optional(),
+        near: nearArg,
       },
     },
-    async ({ templateId, title, state }) =>
+    async ({ templateId, title, state, near }) =>
       run(() => {
         const tpl = ctx.library.get(templateId);
-        const t = board.createTool("agent", { kind: tpl.kind, title: title ?? tpl.name, description: tpl.description, props: tpl.props, state: state ?? tpl.state, width: tpl.width });
+        const t = board.createTool("agent", { kind: tpl.kind, title: title ?? tpl.name, description: tpl.description, props: tpl.props, state: state ?? tpl.state, width: tpl.width, near });
         ctx.library.markUsed(tpl.id);
         return { id: t.id, title: t.title, kind: t.kind, version: t.version, fromTemplate: tpl.id };
       }),

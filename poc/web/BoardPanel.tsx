@@ -133,6 +133,14 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
   }, []);
   /** The tools in a section (by where their top part is, as the server counts them). */
   const toolsInSection = (sec: Section) => tools.filter((tl) => tl.layout && inSection(frameAnchor(tl.layout), sec.layout));
+  // What the person selects is what they work on: Claude's new tools go next to it (the server keeps the last one).
+  const focusKey = [...selectedIds, ...selectedSectionIds].join();
+  useEffect(() => {
+    if (!focusKey) return;
+    const ids = [...selectedIds, ...selectedSectionIds.flatMap((id) => (sectionsById[id] ? toolsInSection(sectionsById[id]).map((tl) => tl.id) : []))];
+    const timer = window.setTimeout(() => ids.length && api.setFocus(ids).catch(() => {}), 400);
+    return () => clearTimeout(timer);
+  }, [focusKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const selectedSections = selectedSectionIds.map((id) => sectionsById[id]).filter(Boolean) as Section[];
 
   // Drop selections whose frames are gone.
@@ -641,6 +649,10 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
         if (tool !== "select") setTool("select");
         setSelectedIds([]);
         setSelectedSectionIds([]);
+      } else if (mod && (e.key === "Delete" || e.key === "Backspace") && selectedSectionIds.length) {
+        // ⌘/Ctrl+Backspace, as in Figma: remove the section only; what is in it stays (even if selected too).
+        take();
+        ungroupSections(selectedSectionIds);
       } else if ((e.key === "Delete" || e.key === "Backspace") && (selectedIds.length || selectedLinkIds.length || selectedSectionIds.length)) {
         take();
         for (const id of selectedLinkIds) api.deleteLink(id).catch((err) => onNotice(err.message));
@@ -750,7 +762,7 @@ function BoardView({ boardId, boardName, active, agentStatus, terminalButton, on
       ...SECTION_COLORS.map((c) => ({ label: `${sec.color === c ? "✓ " : "\u2003"}${t(COLOR_NAMES[c][0], COLOR_NAMES[c][1])}`, onSelect: () => updateSection(sec.id, { color: c }, t("Section color", "섹션 색")) })),
       { separator: true },
       { label: t("Duplicate", "복제"), hint: kbd("mod+d"), onSelect: () => duplicateSection(sec.id) },
-      { label: t("Remove section (keep what is in it)", "섹션만 없애기 (안의 것은 남김)"), hint: kbd("mod+shift+g"), onSelect: () => ungroupSections([sec.id]) },
+      { label: t("Remove section (keep what is in it)", "섹션만 없애기 (안의 것은 남김)"), hint: kbd("mod+backspace"), onSelect: () => ungroupSections([sec.id]) },
       { label: t("Delete section and what is in it", "섹션과 안의 것 삭제"), hint: kbd("delete"), danger: true, onSelect: () => deleteSections([sec.id]) },
     ];
   };

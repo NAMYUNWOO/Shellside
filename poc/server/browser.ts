@@ -73,6 +73,8 @@ interface Tab {
   title: string;
   loading: boolean;
   navSeq: number;
+  /** When its main frame last started loading (for the screencast watchdog). */
+  navStartedAt?: number;
   lifecycle: Set<string>;
   world?: number;
   dialog?: { type: string; message: string; defaultPrompt?: string };
@@ -223,13 +225,22 @@ export class BrowserTool {
   agentBusy = false;
   agentUntil = 0;
   private opening: Promise<void> | null = null;
+  /** The first tab being attached and set up: it is in `tabs` already, but not ready to stream or act on (#8). */
+  private attaching: Promise<void> | null = null;
   private casting: string | null = null;
+  /** When the last screencast frame came (stills don't count), and the watchdog that restarts a stalled stream. */
+  private castFrameAt = 0;
+  private castWatch: NodeJS.Timeout | null = null;
   private lastFrame: Buffer | null = null;
   private syncedUrl: string;
   private queue: Promise<void> = Promise.resolve();
   private moveQueued: any = null;
   private wheelQueued: any = null;
   private swallowRelease = false;
+  /** Mouse buttons and keys the person's view pressed in the page and hasn't released yet (#6): a release that never
+   *  came (the pointer let go outside the frame, the view closed) leaves Chrome holding them, and the agent's clicks
+   *  then don't reach the page. Released before the agent acts. */
+  private held = { buttons: new Set<"left" | "middle" | "right">(), keys: new Map<string, { key: string; code: string; keyCode: number }>(), x: 0, y: 0 };
   private stateTimer: NodeJS.Timeout | null = null;
   private cursorTimer: NodeJS.Timeout | null = null;
   private cursor = "default";
@@ -279,6 +290,9 @@ export class BrowserTool {
   /** A live tab for this tool: starts Chrome and reopens the last address when needed. */
   async ensureOpen(): Promise<Tab> {
     if (this.closed) throw new BoardError("this browser was removed from the board", 410);
+    // A board view that connects while the first tab is set up must not start the stream on it yet: Chrome then sends
+    // no frames, and nothing started it again (#8). It waits for the setup, not for the first page to load.
+    if (this.attaching) await this.attaching;
     if (this.tab) return this.tab;
     this.opening ??= (async () => {
       await this.owner.svc.ready();
@@ -286,8 +300,12 @@ export class BrowserTool {
       const want = this.tool.state.url || "about:blank";
       const url = browserUrlProblem(want) ? "about:blank" : want;
       const { targetId } = await this.chrome.send("Target.createTarget", { url: "about:blank", newWindow: true });
-      await this.adopt(targetId);
-      this.active = this.tabs.length - 1;
+      this.attaching = this.adopt(targetId)
+        .then(() => {
+          this.active = this.tabs.length - 1;
+        })
+        .finally(() => (this.attaching = null));
+      await this.attaching;
       if (url !== "about:blank") await this.navigate(this.tab!, url).catch((err) => this.broadcast({ t: "error", message: errText(err) }));
       this.changed();
       void this.updateCast();
@@ -377,6 +395,7 @@ export class BrowserTool {
     this.viewers.clear();
     this.views.clear();
     if (this.ackTimer) clearTimeout(this.ackTimer);
+    if (this.castWatch) clearTimeout(this.castWatch);
     await this.closeTabs();
     this.net.clear();
   }
@@ -419,6 +438,7 @@ export class BrowserTool {
       case "Page.frameStartedLoading":
         if (main(p.frameId)) {
           tab.loading = true;
+          tab.navStartedAt = Date.now();
           tab.navSeq++;
           tab.lifecycle.clear();
           this.changed();
@@ -428,6 +448,7 @@ export class BrowserTool {
         if (main(p.frameId)) {
           tab.loading = false;
           this.changed();
+          this.watchCast(tab);
         }
         return;
       case "Page.lifecycleEvent":
@@ -698,9 +719,23 @@ export class BrowserTool {
     await this.sendStill(this.tab);
   }
 
+  /** Watchdog (#8): a page finished loading while someone watches, yet no screencast frame came since it started:
+   *  the stream stalled, so start it again (once per load). */
+  private watchCast(tab: Tab) {
+    if (tab.sessionId !== this.casting) return;
+    const started = tab.navStartedAt ?? 0;
+    if (this.castWatch) clearTimeout(this.castWatch);
+    this.castWatch = setTimeout(() => {
+      this.castWatch = null;
+      if (this.closed || tab.sessionId !== this.casting || this.tab !== tab || this.castFrameAt >= started) return;
+      void this.updateCast(true);
+    }, 1000);
+  }
+
   /** A picture of the page: from the screencast (data is the decoded JPEG) or a one-off screenshot (base64, no ack). */
   private onFrame(tab: Tab, data: Buffer | string, frameSession: number | null) {
     const ack = () => void this.send(tab, "Page.screencastFrameAck", { sessionId: frameSession }).catch(() => {});
+    if (frameSession !== null && tab.sessionId === this.casting) this.castFrameAt = Date.now();
     if (tab.sessionId !== this.casting) return void (frameSession !== null && ack());
     const buf = typeof data === "string" ? Buffer.from(data, "base64") : data;
     this.lastFrame = buf;
@@ -879,6 +914,8 @@ export class BrowserTool {
             return;
           }
         }
+        this.held.buttons.add(button);
+        Object.assign(this.held, { x, y });
         await this.raceDialog(tab, this.send(tab, "Input.dispatchMouseEvent", { type: "mousePressed", ...base, button, clickCount: Math.max(1, msg.clickCount | 0) }));
       });
     } else if (msg.type === "up") {
@@ -887,6 +924,7 @@ export class BrowserTool {
           this.swallowRelease = false;
           return;
         }
+        this.held.buttons.delete(button);
         await this.raceDialog(tab, this.send(tab, "Input.dispatchMouseEvent", { type: "mouseReleased", ...base, button, clickCount: Math.max(1, msg.clickCount | 0) }));
       });
     }
@@ -910,9 +948,11 @@ export class BrowserTool {
     const keyCode = msg.keyCode | 0;
     const mods = msg.mods | 0;
     if (msg.type === "up") {
+      this.held.keys.delete(code || key);
       await this.send(tab, "Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers: mods });
       return;
     }
+    this.held.keys.set(code || key, { key, code, keyCode });
     const text = typeof msg.text === "string" && msg.text ? msg.text : undefined;
     const commands = macCommands(key, mods);
     await this.raceDialog(
@@ -1170,6 +1210,36 @@ export class BrowserTool {
     for (const [, key, code, keyCode] of held.reverse()) await this.send(tab, "Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: keyCode, modifiers: 0 });
   }
 
+  /** Let go of what the person's view left pressed in the page (see `held`), and with `left`, the left button anyway. */
+  private async releaseHeld(tab: Tab, left = false, at?: { x: number; y: number }) {
+    const { x, y } = at ?? this.held;
+    const buttons = new Set(this.held.buttons);
+    if (left) buttons.add("left");
+    for (const button of buttons) await this.send(tab, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount: 1 }).catch(() => {});
+    for (const k of this.held.keys.values())
+      await this.send(tab, "Input.dispatchKeyEvent", { type: "keyUp", key: k.key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers: 0 }).catch(() => {});
+    this.held.buttons.clear();
+    this.held.keys.clear();
+  }
+
+  /** The agent's click, checked (#6): if the page got no mouse press at all, let go of any held button and click
+   *  again; if it still gets none, click the element directly and say so. A click the page never got isn't "done". */
+  private async clickChecked(tab: Tab, t: string, x: number, y: number, count: number, nav: number): Promise<{ dialog?: boolean; note?: string }> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const watch = await this.inpage(tab, "watchClick", t).catch(() => null);
+      if ((await this.click(tab, x, y, count)) === "dialog") return { dialog: true };
+      if (watch == null || tab.navSeq !== nav) return {};
+      await sleep(30);
+      const seen = await this.inpage(tab, "clickSeen", watch).catch(() => null);
+      if (!seen || seen.down > 0 || tab.navSeq !== nav) return {}; // got it (or a new page came: it got it)
+      // Logged so the next time can be looked into (the cause of #6 isn't known).
+      console.warn(`[browser] the page got no mouse press for a click (attempt ${attempt + 1}): ${t} at ${x},${y}, viewport ${JSON.stringify(this.viewport)}, held ${[...this.held.buttons].join("+") || "nothing"}`);
+      await this.releaseHeld(tab, true, { x, y });
+    }
+    await this.inpage(tab, "clickDirect", t);
+    return { note: "the page didn't get the mouse click, so the element was clicked directly (no pointer events)" };
+  }
+
   private async click(tab: Tab, x: number, y: number, count = 1) {
     await this.send(tab, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
     for (let i = 1; i <= count; i++) {
@@ -1267,7 +1337,9 @@ export class BrowserTool {
     this.checkAgent(actor, "write");
     if (!Array.isArray(steps) || !steps.length) throw new BoardError('steps must be a non-empty list, e.g. [{"goto": "https://example.com"}, {"click": "@3"}]');
     if (steps.length > 60) throw new BoardError("at most 60 steps per call");
-    await this.ensureOpen();
+    const first = await this.ensureOpen();
+    if (actor === "agent" && (this.held.buttons.size || this.held.keys.size)) await this.releaseHeld(first);
+    if (actor === "agent") this.owner.board.setFocus([this.toolId]);
     this.agentBusy = actor === "agent";
     this.notes = [];
     const downloadsBefore = this.downloads.length;
@@ -1362,9 +1434,12 @@ export class BrowserTool {
       }
       this.show(key === "click" ? "click" : "double-click", p.what, p.x, p.y);
       await pause();
-      const r = await this.click(tab, p.x, p.y, key === "click" ? 1 : 2);
-      if (r !== "dialog") await this.afterAction(tab, nav);
-      return { did: `${key === "click" ? "clicked" : "double-clicked"} ${p.what}`, ...(p.covered ? { note: `something covered it (${p.covered}); the click landed on that` } : {}) };
+      // Covered (a banner, another site's frame): the press goes to that, so there is nothing of the target's to check.
+      const count = key === "click" ? 1 : 2;
+      const r: { dialog?: boolean; note?: string } = p.covered ? { dialog: (await this.click(tab, p.x, p.y, count)) === "dialog" } : await this.clickChecked(tab, t, p.x, p.y, count, nav);
+      if (!r.dialog) await this.afterAction(tab, nav);
+      const note = [p.covered ? `something covered it (${p.covered}); the click landed on that` : "", r.note ?? ""].filter(Boolean).join("; ");
+      return { did: `${key === "click" ? "clicked" : "double-clicked"} ${p.what}`, ...(note ? { note } : {}) };
     }
     if ("fill" in step) {
       const t = target("fill");
@@ -1739,7 +1814,7 @@ export class BoardBrowsers {
   }
 
   /** Open an address: in an existing browser (toolId) or in a new browser tool on the board. */
-  async open(actor: Actor, input: { url: string; toolId?: string; title?: string; name?: string; width?: number; height?: number }) {
+  async open(actor: Actor, input: { url: string; toolId?: string; title?: string; name?: string; width?: number; height?: number; near?: string }) {
     const url = addressToUrl(String(input.url ?? ""));
     const problem = browserUrlProblem(url);
     if (problem) throw new BoardError(problem);
@@ -1754,7 +1829,7 @@ export class BoardBrowsers {
     try {
       host = url === "about:blank" ? "" : new URL(url).hostname.replace(/^www\./, "");
     } catch {}
-    const t = this.board.createTool(actor, { kind: "browser", title: input.title?.trim() || host || "Browser", name: input.name, state: { url }, width: input.width, height: input.height });
+    const t = this.board.createTool(actor, { kind: "browser", title: input.title?.trim() || host || "Browser", name: input.name, state: { url }, width: input.width, height: input.height, near: input.near });
     const bt = this.get(t.id);
     await bt.ensureOpen();
     await bt.settled(20000);

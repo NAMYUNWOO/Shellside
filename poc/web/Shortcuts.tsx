@@ -23,7 +23,7 @@ const groups = (t: T): { title: string; rows: [string, string[]][] }[] => [
     rows: [
       [t("Put the selection in a new section", "선택한 것을 새 섹션으로 묶기"), [kbd("shift+s"), kbd("mod+alt+s")]],
       [t("Move a section and what is in it", "섹션과 안의 것을 함께 옮기기"), [t("Drag its name", "이름을 드래그")]],
-      [t("Remove the section, keep what is in it", "섹션만 없애기 (안의 것은 남김)"), [kbd("mod+shift+g")]],
+      [t("Remove the section, keep what is in it", "섹션만 없애기 (안의 것은 남김)"), [kbd("mod+backspace"), kbd("mod+shift+g")]],
       [t("Delete the section and what is in it", "섹션과 안의 것 삭제"), [kbd("delete")]],
       [t("Send a section to Claude", "섹션을 Claude에게 보내기"), [kbd("mod+enter"), "@" + t("name", "이름")]],
     ],

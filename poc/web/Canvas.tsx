@@ -311,6 +311,13 @@ export function BoardCanvas(props: BoardCanvasProps) {
       e.preventDefault();
       const step = e.shiftKey ? 10 : 1;
       if (!nudgeFrom.current) nudgeFrom.current = new Map(rf.getNodes().filter((n) => selectedSet.current.has(n.id)).map((n) => [n.id, { ...n.position }]));
+      // Kept as pending at once (not only when saved): the board redrawing in the meantime (a drag's save coming back,
+      // a selection change) would otherwise put the frames back where the server has them.
+      for (const n of rf.getNodes()) {
+        if (!selectedSet.current.has(n.id) || n.type !== "frame") continue;
+        const layout = { x: Math.round(n.position.x + dir[0] * step), y: Math.round(n.position.y + dir[1] * step) };
+        pending.current.set(n.id, { layout: { ...pending.current.get(n.id)?.layout, ...layout }, until: Date.now() + 5000 });
+      }
       setNodes((nds) => nds.map((n) => (selectedSet.current.has(n.id) ? { ...n, position: { x: n.position.x + dir[0] * step, y: n.position.y + dir[1] * step } } : n)));
       onInteract();
       window.clearTimeout(nudgeSave.current);

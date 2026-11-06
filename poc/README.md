@@ -141,7 +141,7 @@ certificate):
 | **Right-click menu** | Send to Claude… · Zoom to selection · Rename · Save to library… · Copy name · Copy ID · Copy · Duplicate · Agent access · Delete, each with its shortcut. Right-click empty space = + Note / + Checklist / + Browser / + Code editor here, Paste here |
 | **Files** | Drop files from your computer on the canvas: each becomes a file frame where it lands (several go side by side). The file is kept in the board's workspace (`files/`), where Claude reads it at its path; the frame shows its name, size and path, a preview (images, the start of text, CSV, JSON, code), Open, Show in folder (desktop app) and Copy path, and a note that Claude reads too. Any size: the desktop app copies the file from where it is (on macOS a clone: instant, no extra space); a browser streams it, with progress, after checking the disk has room. A text file's Edit opens it in a code editor. A folder dropped in the desktop app opens in a code editor. Like any frame it has an @name, links, sections, undo, and goes to Claude with its path |
 | **Code editor** | Monaco (VS Code's editor) on a folder, a project or one file of this computer: + → Code editor, or E, then a path (the board's work folder is filled in; the desktop app has a Browse button). A folder shows its files on the left (one level at a time) and opens them in tabs; + makes a new file. ⌘/Ctrl+S saves. You and Claude edit the same files: when Claude changes an open file the editor shows the new version, and if you have unsaved changes there it asks which to keep (a save never silently overwrites a newer file). The editor reaches nothing outside its folder (no `..`, no symlinks out), opens text files up to 5 MB, and works for the paired browser only. Its open tabs are in its state, so Claude sees what you are looking at and can open a file for you (`code_open`). Drag its sides and bottom corners to resize it |
-| **Sections** | Named, coloured areas that group frames, as in Figma. Shift+S draws one (or puts the selected frames in one). A frame belongs to the section its top part is in, so dragging a frame in or out moves it in or out. Drag a section's name to move it with what is in it; its grips resize it (what is in it stays). Double-click the name to rename it; the properties panel picks its colour. Delete removes it with what is in it (⌘/Ctrl+Z brings it back); ⇧⌘G / Ctrl+Shift+G removes just the section. Send a section to Claude, or write `@section1` |
+| **Sections** | Named, coloured areas that group frames, as in Figma. Shift+S draws one (or puts the selected frames in one). A frame belongs to the section its top part is in, so dragging a frame in or out moves it in or out. Drag a section's name to move it with what is in it; its grips resize it (what is in it stays). Double-click the name to rename it; the properties panel picks its colour. Delete removes it with what is in it (⌘/Ctrl+Z brings it back); ⌘/Ctrl+Backspace (or ⇧⌘G / Ctrl+Shift+G) removes just the section and leaves what is in it. Send a section to Claude, or write `@section1` |
 | **Zoom menu** (the % at the top) | Zoom in / out, to fit, to the selection, 50 / 100 / 200 %, minimap, properties panel, keyboard shortcuts |
 | Right: **Inspector** | One selected: title, name (`@…`, unique on the board; letters of any script, digits, `_ . -`), properties, X/Y/W, access, logs, code. Several selected: bulk actions. None: layers and history |
 | Top right: **Terminal button** | Opens this board's terminal window (Ctrl+\`). Shows the Shellside mark (a nautilus shell) inside the button while Claude runs in this board's terminal, and `!` when a permission prompt is waiting |
@@ -159,7 +159,7 @@ method on too.
 | View | ⌘/Ctrl + = / − zoom · ⇧0 100% · ⇧1 fit all · ⇧2 fit the selection · ⌘/Ctrl+\ properties panel |
 | Edit | ⌘/Ctrl+Z undo · ⇧⌘Z / Ctrl+Y redo · ⌘/Ctrl+C, X, V copy, cut, paste (frames; the clipboard gets their @names) · ⌘/Ctrl+D duplicate · arrows move 1 (⇧ 10) · Delete · ⌘/Ctrl+A select all · Esc deselect |
 | Frames | Enter = edit the selected frame (its first field) · Esc = stop editing and select it · double-click the name = rename |
-| Sections | Shift+S draw a section, or put the selection in one · ⌘⌥S / Ctrl+Alt+S put the selection in one · ⇧⌘G / Ctrl+Shift+G remove the section, keep what is in it · Delete delete it with what is in it · ⌘/Ctrl+D duplicate it with what is in it |
+| Sections | Shift+S draw a section, or put the selection in one · ⌘⌥S / Ctrl+Alt+S put the selection in one · ⌘/Ctrl+Backspace or ⇧⌘G / Ctrl+Shift+G remove the section, keep what is in it · Delete delete it with what is in it · ⌘/Ctrl+D duplicate it with what is in it |
 | Claude | / = the input box · ⌘/Ctrl+Enter = send the selection · Ctrl+` = terminal |
 
 Undo covers what you do on the canvas (move, resize, add, duplicate, paste, delete, rename; sections too), not the
@@ -231,6 +231,10 @@ what is on screen. There is no Edit or Save button.
   `section_create` draws one around given tools (or at x, y, w, h); `section_update` renames, recolours, moves (the
   tools in it go along) or resizes it; `section_delete` removes it and leaves its tools. Only the person deletes a
   section with what is in it.
+- Where new tools go: next to what the person's request or selection is about, else next to the tool Claude last made
+  or changed (so a few new tools form a group beside the work). It takes the nearest free spot (right, then below), and
+  if the work is in a section, the section grows to take it in when that brings in nothing else. Creating tools take
+  `near` (a tool or a section) to choose.
 - Wherever a tool takes a `toolId`, the tool's name works too (`research` or `@research`). `board_list` returns the
   links (`"reads": "@notes → @browser1"`, direction `none` / `forward` / `both`), `tool_read` a tool's own links, and
   `board_wait_event` tells the agent when the person adds, turns or removes one. The agent can change or remove only
@@ -290,6 +294,9 @@ A **browser** tool is a real Chrome tab on the board (toolbar **+ Browser**, rig
   each did plus a fresh snapshot, in the spirit of [ego-lite](https://github.com/citrolabs/ego-lite): fewer round trips
   than one tool call per click. Targets are `@N`, `css:<selector>` or `text:<visible text>`. The snapshot is built by a
   script in an isolated world, so page scripts can't see or tamper with it; password values are never included.
+  Each click checks that the page got the mouse press: if it didn't, the click is tried again and then made on the
+  element directly, and the step says so (a click the page never got is never reported as done). The board browser
+  doesn't offer to save passwords: headless, nobody would see that prompt, and while it was up the page got no clicks.
 - **What the page loaded.** `browser_network` lists the page loads and the data requests behind them (XHR/fetch, with
   status, type and size), and `browser_network_body` reads one response with the request body the page sent. Data a site
   fetches from its own API (listings, prices, search results) comes back exact instead of read off the screen; big
